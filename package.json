@@ -2,6 +2,11 @@
   "name": "kook-linux",
   "version": "0.0.7",
   "description": "KOOK 官方客户端的 Linux 原生移植版（社区项目，非套壳网页）",
+  "homepage": "https://github.com/kanniganfan/kook-linux",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kanniganfan/kook-linux.git"
+  },
   "author": {
     "name": "KANNI",
     "email": "cylqm@qq.com"

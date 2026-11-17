@@ -36,7 +36,7 @@ Linux 用户想用只能拿 Wine / Proton 跑 Windows 版，结果语音链路�
 |---|---|
 | 邮箱 | <cylqm@qq.com> |
 | 官方仓库 | [github.com/kaiheila](https://github.com/kaiheila) |
-| 本移植版 | 在这个仓库提 Issue |
+| 本移植版 | [github.com/kanniganfan/kook-linux](https://github.com/kanniganfan/kook-linux) |
 
 报问题的时候请带上：发行版与版本、桌面环境（X11 / Wayland）、KOOK 版本号，
 以及 `~/.config/KOOK/logs/` 里对应的日志片段。
