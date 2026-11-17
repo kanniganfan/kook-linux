@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=KOOK
+Exec=/opt/KOOK/kook-linux %U
+Terminal=false
+Type=Application
+Icon=kook-linux
+StartupWMClass=KOOK
+GenericName=Voice Chat
+Comment=KOOK 官方 Windows 客户端的 Linux 原生移植版，基于 Electron 36，直接运行官方客户端本体，不使用第三方网页套壳。
+Categories=Network;InstantMessaging;AudioVideo;
+Keywords=kook;voice;chat;开黑;语音;
+MimeType=x-scheme-handler/kook;

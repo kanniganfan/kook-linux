@@ -1,0 +1,53 @@
+Name:           kook
+Version:        __VERSION__
+Release:        1
+Summary:        KOOK Linux 客户端
+License:        MIT
+URL:            https://github.com/
+Vendor:         KANNI
+Packager:       KANNI <cylqm@qq.com>
+BuildArch:      x86_64
+# 自动依赖扫描会去遍历 300MB+ 的文件，既慢又容易因为 Electron 自带的
+# 私有 so 报错，依赖直接手写
+AutoReqProv:    no
+
+Requires:       gtk3
+Requires:       libnotify
+Requires:       nss
+Requires:       libXScrnSaver
+Requires:       libXtst
+Requires:       xdg-utils
+Requires:       at-spi2-core
+Requires:       libuuid
+Requires:       libsecret
+
+%description
+KOOK 官方 Windows 客户端的 Linux 原生移植版，基于 Electron 36，
+直接运行官方客户端本体，不使用第三方网页套壳。
+
+%prep
+
+%build
+
+%install
+rm -rf %{buildroot}
+mkdir -p %{buildroot}/opt/KOOK
+cp -a %{_sourcedir}/app/. %{buildroot}/opt/KOOK/
+mkdir -p %{buildroot}/usr/bin
+ln -sf /opt/KOOK/kook-linux %{buildroot}/usr/bin/kook-linux
+mkdir -p %{buildroot}/usr/share/applications
+cp %{_sourcedir}/kook-linux.desktop %{buildroot}/usr/share/applications/kook-linux.desktop
+for s in 16 24 32 48 64 96 128 256 512; do
+  mkdir -p %{buildroot}/usr/share/icons/hicolor/${s}x${s}/apps
+  cp %{_sourcedir}/icons/${s}x${s}.png %{buildroot}/usr/share/icons/hicolor/${s}x${s}/apps/kook-linux.png
+done
+
+%files
+/opt/KOOK
+/usr/bin/kook-linux
+/usr/share/applications/kook-linux.desktop
+/usr/share/icons/hicolor/*/apps/kook-linux.png
+
+%changelog
+* Tue Nov 18 2026 KANNI <cylqm@qq.com> - __VERSION__-1
+- KOOK Linux 原生移植版 v__VERSION__

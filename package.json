@@ -1,0 +1,93 @@
+{
+  "name": "kook-linux",
+  "version": "0.0.7",
+  "description": "KOOK 官方客户端的 Linux 原生移植版（社区项目，非套壳网页）",
+  "author": {
+    "name": "KANNI",
+    "email": "cylqm@qq.com"
+  },
+  "license": "MIT",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "stage": "bash scripts/stage.sh",
+    "dist": "bash scripts/build.sh",
+    "dist:appimage": "bash scripts/build.sh AppImage",
+    "dist:deb": "bash scripts/build.sh deb",
+    "dist:rpm": "bash scripts/build.sh rpm"
+  },
+  "build": {
+    "appId": "cn.kookapp.linux.port",
+    "productName": "KOOK",
+    "copyright": "Copyright © 2026 KANNI",
+    "asar": false,
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
+    "buildDependenciesFromSource": false,
+    "electronVersion": "36.7.4",
+    "electronDist": ".electron-dist",
+    "directories": {
+      "app": ".stage/app",
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "**/*",
+      "!**/node_modules/.cache/**"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm"
+      ],
+      "category": "Network;InstantMessaging;AudioVideo",
+      "icon": "build/icons",
+      "executableName": "kook-linux",
+      "synopsis": "KOOK Linux 客户端",
+      "description": "KOOK 官方 Windows 客户端的 Linux 原生移植版，基于 Electron 36，直接运行官方客户端本体，不使用第三方网页套壳。",
+      "desktop": {
+        "Name": "KOOK",
+        "GenericName": "Voice Chat",
+        "Comment": "KOOK 语音",
+        "Categories": "Network;InstantMessaging;AudioVideo;",
+        "Keywords": "kook;voice;chat;开黑;语音;",
+        "StartupWMClass": "KOOK",
+        "Terminal": "false",
+        "MimeType": "x-scheme-handler/kook;"
+      },
+      "maintainer": "KANNI <cylqm@qq.com>"
+    },
+    "deb": {
+      "priority": "optional",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ],
+      "maintainer": "KANNI <cylqm@qq.com>"
+    },
+    "rpm": {
+      "depends": [
+        "gtk3",
+        "libnotify",
+        "nss",
+        "libXScrnSaver",
+        "libXtst",
+        "xdg-utils",
+        "at-spi2-core",
+        "libuuid",
+        "libsecret"
+      ]
+    },
+    "appImage": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
+  }
+}

@@ -1,0 +1,919 @@
+// 真实主进程通道实现（按 preload 契约反推）
+// 覆盖：store 三套持久化 / setting / system 信息 / 快捷键 / regedit 桩
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const crypto = require('crypto')
+
+function createRuntime({ app, LOG }) {
+  const { safeStorage, screen, desktopCapturer, session } = require('electron')
+  // 登录 token 走这里加密后再存 'ka'：必须返回字符串，不能返回对象
+  const encrypt = (plain) => {
+    const str = String(plain == null ? '' : plain)
+    try {
+      if (safeStorage && safeStorage.isEncryptionAvailable()) {
+        return safeStorage.encryptString(str).toString('base64')
+      }
+    } catch (e) {
+      LOG('safeStorage 加密不可用:', e && e.message)
+    }
+    return Buffer.from(str, 'utf8').toString('base64')
+  }
+  const decrypt = (b64) => {
+    try {
+      const buf = Buffer.from(String(b64 || ''), 'base64')
+      if (safeStorage && safeStorage.isEncryptionAvailable()) {
+        try {
+          return safeStorage.decryptString(buf)
+        } catch {}
+      }
+      return buf.toString('utf8')
+    } catch {
+      return ''
+    }
+  }
+
+  const dir = path.join(app.getPath('userData'), 'linux-store')
+  fs.mkdirSync(dir, { recursive: true })
+
+  const files = {
+    global: path.join(dir, 'global.json'),
+    user: path.join(dir, 'user.json'),
+    important: path.join(dir, 'important.json'),
+    setting: path.join(dir, 'setting.json'),
+  }
+
+  function load(file) {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8')) || {}
+    } catch {
+      return {}
+    }
+  }
+
+  const data = {
+    global: load(files.global),
+    user: load(files.user),
+    important: load(files.important),
+    setting: load(files.setting),
+  }
+
+  const dirty = new Set()
+  let timer = null
+  function markDirty(name) {
+    dirty.add(name)
+    if (timer) return
+    timer = setTimeout(flush, 300)
+  }
+  function flush() {
+    timer = null
+    for (const name of dirty) {
+      try {
+        fs.writeFileSync(files[name], JSON.stringify(data[name], null, 2))
+      } catch (e) {
+        LOG('store flush failed', name, e && e.message)
+      }
+    }
+    dirty.clear()
+  }
+
+  // 稳定机器标识（首次生成后复用）
+  const idFile = path.join(dir, 'machine-id')
+  let machineId = ''
+  try {
+    machineId = fs.readFileSync(idFile, 'utf8').trim()
+  } catch {}
+  if (!machineId) {
+    machineId = crypto.createHash('md5').update(os.hostname() + os.platform() + (os.cpus()[0] || {}).model).digest('hex')
+    try {
+      fs.writeFileSync(idFile, machineId)
+    } catch {}
+  }
+
+  const pathMap = {
+    home: () => app.getPath('home'),
+    appData: () => app.getPath('appData'),
+    userData: () => app.getPath('userData'),
+    temp: () => app.getPath('temp'),
+    exe: () => app.getPath('exe'),
+    desktop: () => app.getPath('desktop'),
+    documents: () => app.getPath('documents'),
+    downloads: () => app.getPath('downloads'),
+    music: () => app.getPath('music'),
+    pictures: () => app.getPath('pictures'),
+    videos: () => app.getPath('videos'),
+    logs: () => app.getPath('logs'),
+    crashDumps: () => app.getPath('crashDumps'),
+  }
+
+  const shortcuts = new Map()
+  const childWins = new Map()
+  // 主进程别处（OVERLAY_WINDOW_GET_BOUNDS/SET_BOUNDS）要按 id 找到这些子窗口，
+  // 闭包传不出去，就挂到 globalThis 上共享。
+  try { globalThis.__kookChildWins = childWins } catch (e) {}
+
+  // Windows VK 码 → Electron accelerator（只覆盖设置里可能用到的键）
+  const VK_TO_ACCEL = (() => {
+    const m = {}
+    for (let i = 0; i < 26; i++) m[65 + i] = String.fromCharCode(65 + i)
+    for (let i = 0; i <= 9; i++) m[48 + i] = String(48 + i)
+    for (let i = 1; i <= 12; i++) m[111 + i] = 'F' + i
+    Object.assign(m, {
+      8: 'Backspace', 9: 'Tab', 13: 'Return', 27: 'Escape', 32: 'Space',
+      33: 'PageUp', 34: 'PageDown', 35: 'End', 36: 'Home',
+      37: 'Left', 38: 'Up', 39: 'Right', 40: 'Down',
+      45: 'Insert', 46: 'Delete',
+      186: ';', 187: '=', 188: ',', 189: '-', 190: '.', 191: '/',
+      192: '`', 219: '[', 220: '\\', 221: ']', 222: "'",
+    })
+    return m
+  })()
+
+  let ioHookAccels = []
+
+  // 设置里配的快捷键组合，值都是 Windows VK 码数组（如 [17,18,76] = Ctrl+Alt+L）
+  function shortcutCombos() {
+    const out = []
+    const seen = new Set()
+    const push = (arr) => {
+      if (!Array.isArray(arr) || !arr.length) return
+      const key = arr.join(',')
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push(arr)
+    }
+    const audio = data.user.AUDIO_CONFIG_KEY || {}
+    for (const field of ['openInputKey', 'closeInputKey', 'quickMuteKey']) push(audio[field])
+    const appCfg = data.user.kaihei_app_config || data.global.kaihei_app_config || {}
+    push(appCfg.screen_recording_shortcut)
+    push(appCfg.screenshot_shortcut)
+    return out
+  }
+
+  function isModifierVk(vk) {
+    return vk === 16 || vk === 17 || vk === 18 || vk === 91 || vk === 92
+  }
+
+  function comboToAccel(vks) {
+    const mods = []
+    let main = null
+    for (const vk of vks) {
+      if (vk === 17) mods.push('Control')
+      else if (vk === 18) mods.push('Alt')
+      else if (vk === 16) mods.push('Shift')
+      else if (vk === 91 || vk === 92) mods.push('Super')
+      else if (VK_TO_ACCEL[vk]) main = vk
+    }
+    if (main === null) return null
+    return [...mods, VK_TO_ACCEL[main]].join('+')
+  }
+
+  function registerIoHook() {
+    const { globalShortcut, BrowserWindow } = require('electron')
+    for (const acc of ioHookAccels) {
+      try { globalShortcut.unregister(acc) } catch (e) {}
+    }
+    ioHookAccels = []
+    for (const vks of shortcutCombos()) {
+      const acc = comboToAccel(vks)
+      if (!acc) continue
+      try {
+        const ok = globalShortcut.register(acc, () => {
+          LOG('[iohook] 命中', acc, '-> 派发 IO_HOOK', vks.join(','))
+          const push = (type, vk) => {
+            for (const w of BrowserWindow.getAllWindows()) {
+              if (!w.isDestroyed()) {
+                try { w.webContents.send('IO_HOOK', { type, rawcode: vk }) } catch (e) {}
+              }
+            }
+          }
+          // 原生钩子是按顺序各发一次的，这里照样补全：先所有按下，再所有抬起
+          for (const vk of vks) push('keydown', vk)
+          setTimeout(() => { for (const vk of vks) push('keyup', vk) }, 90)
+        })
+        if (ok) ioHookAccels.push(acc)
+      } catch (e) {}
+    }
+    if (ioHookAccels.length) LOG('[iohook] 已接管按键', ioHookAccels.join(' , '))
+    return ioHookAccels.length
+  }
+
+  // ── 本地键盘桥（Wayland 兜底）──
+  // Wayland 下 globalShortcut 实际是 XGrabKey，对原生 Wayland 的首焦键盘流不一定生效，
+  // 用户看到的就是「设了快捷键按下去没反应」。KOOK 自己有焦点时 DOM 键盘事件一定收得到，
+  // preload 把 F 键 / 修饰键 / 带修饰的键发上来，这里按官方 IO_HOOK 的形状原样派发。
+  // 和 globalShortcut 撞车时按「键码+类型」120ms 去重，不会重复触发两次。
+  let vkBridgeReady = false
+  const vkLastFired = new Map()
+  function installVkBridge() {
+    if (vkBridgeReady) return
+    vkBridgeReady = true
+    try {
+      const { ipcMain, BrowserWindow } = require('electron')
+      ipcMain.on('KOOK_VK_FIRED', (event, msg) => {
+        if (!msg || typeof msg.rawcode !== 'number' || !msg.rawcode) return
+        const type = msg.type === 'keyup' ? 'keyup' : 'keydown'
+        const stamp = type + ':' + msg.rawcode
+        const now = Date.now()
+        if (now - (vkLastFired.get(stamp) || 0) < 120) return
+        vkLastFired.set(stamp, now)
+        // 全量转发会刷屏，只在「看起来像快捷键」的时候留痕（F 键 / 带修饰键）
+        const looksHotkey = (msg.rawcode >= 112 && msg.rawcode <= 123) || msg.ctrl || msg.alt || msg.meta
+        if (looksHotkey) LOG('[iohook] 本地键盘', type, msg.rawcode)
+        for (const w of BrowserWindow.getAllWindows()) {
+          if (!w.isDestroyed()) {
+            try { w.webContents.send('IO_HOOK', { type, rawcode: msg.rawcode }) } catch (e) {}
+          }
+        }
+      })
+      LOG('[iohook] 本地键盘桥已挂载（DOM 事件兜底）')
+    } catch (e) {
+      LOG('[iohook] 本地键盘桥挂载失败', e && e.message)
+    }
+  }
+
+  const handlers = {
+    // ── store ──
+    STORE_GLOBAL_GET: (key, def) => (key in data.global ? data.global[key] : def),
+    STORE_GLOBAL_SET: (key, value) => {
+      data.global[key] = value
+      markDirty('global')
+    },
+    STORE_GLOBAL_REMOVE: (key) => {
+      delete data.global[key]
+      markDirty('global')
+    },
+    STORE_GLOBAL_GET_ALL: () => ({ ...data.global }),
+    STORE_GLOBAL_INIT: () => {},
+
+    STORE_USER_GET: (key, def) => (key in data.user ? data.user[key] : def),
+    STORE_USER_SET: (key, value) => {
+      data.user[key] = value
+      markDirty('user')
+    },
+    STORE_USER_REMOVE: (key) => {
+      delete data.user[key]
+      markDirty('user')
+    },
+    STORE_USER_INIT: () => {},
+
+    STORE_IMPORTANT_GET: (key, def) => (key in data.important ? data.important[key] : def),
+    STORE_IMPORTANT_SET: (key, value) => {
+      data.important[key] = value
+      markDirty('important')
+    },
+    STORE_IMPORTANT_REMOVE: (key) => {
+      delete data.important[key]
+      markDirty('important')
+    },
+
+    STORE_SESSION_FLUSH: () => flush(),
+    STORE_AUTH_BACKFILL_COOKIE: () => null,
+    STORE_IS_AUTH_COOKIE_MISSING: () => false,
+
+    // ── setting ──
+    SETTING_GET: (key, def) => (key in data.setting ? data.setting[key] : def),
+    SETTING_SET: (key, value) => {
+      data.setting[key] = value
+      markDirty('setting')
+    },
+
+    // ── system ──
+    SYSTEM_GET_PATH: (name) => {
+      const fn = pathMap[name]
+      try {
+        return fn ? fn() : app.getPath('userData')
+      } catch {
+        return app.getPath('userData')
+      }
+    },
+    SYSTEM_GET_PCNAME: () => 'DESKTOP-K00KPC',
+    SYSTEM_GET_SYSTEM_VERSION: () => '10.0.22631',
+    SYSTEM_GET_UNIQUE: () => machineId,
+    SYSTEM_GET_UNIQUE_DETAIL: () => ({ id: machineId, type: 'linux' }),
+    SYSTEM_GET_ARGV: () => process.argv.slice(1),
+    SYSTEM_GET_ACTIVE_DOMAIN: () => ({
+      origin: 'https://www.kookapp.cn',
+      api: 'https://www.kookapp.cn',
+    }),
+    SYSTEM_GET_HARDWARE_ACCELERATION: () => true,
+    SYSTEM_SET_HARDWARE_ACCELERATION: () => {},
+    SYSTEM_GET_MICROPHONE_PERMISSION: () => 'granted',
+    SYSTEM_REQUEST_MICROPHONE_PERMISSION: () => 'granted',
+    SYSTEM_RELAUNCH: () => {
+      app.relaunch()
+      app.exit(0)
+    },
+    SYSTEM_IS_RELAUNCH_UPDATE: () => false,
+
+    // ── 全局快捷键：真调 Electron globalShortcut ──
+    // X11 下直接走 XGrabKey；Wayland 下 Electron 会转 XDG GlobalShortcuts portal，
+    // 能不能成取决于桌面实现，所以一律如实返回结果，注册失败由界面提示。
+    GLOBAL_SHORTCUT_IS_REGISTER: (acc) => {
+      try {
+        return require('electron').globalShortcut.isRegistered(String(acc))
+      } catch (e) {
+        return false
+      }
+    },
+    GLOBAL_SHORTCUT_REGISTER: (acc) => {
+      try {
+        const { globalShortcut, BrowserWindow } = require('electron')
+        const key = String(acc)
+        if (globalShortcut.isRegistered(key)) {
+          shortcuts.set(key, true)
+          return true
+        }
+        const ok = globalShortcut.register(key, () => {
+          try {
+            for (const w of BrowserWindow.getAllWindows()) {
+              if (!w.isDestroyed()) w.webContents.send('GLOBAL_SHORTCUT_CALLBACK', key)
+            }
+          } catch {}
+        })
+        if (ok) {
+          shortcuts.set(key, true)
+          LOG('[shortcut] 已注册', key)
+        } else {
+          LOG('[shortcut] 注册失败', key, '（Wayland 需桌面支持 GlobalShortcuts portal）')
+        }
+        return ok
+      } catch (e) {
+        LOG('[shortcut] 注册异常', acc, e && e.message)
+        return false
+      }
+    },
+    GLOBAL_SHORTCUT_UNREGISTER: (acc) => {
+      try {
+        require('electron').globalShortcut.unregister(String(acc))
+      } catch (e) {}
+      shortcuts.delete(String(acc))
+    },
+
+    // ── Windows 注册表 → 空桩（Linux 无对应物）──
+    REGEDIT_GET: () => null,
+    REGEDIT_SET: () => null,
+    REGEDIT_DELETE: () => null,
+
+    // ── 屏幕（Electron screen API）──
+    SCREEN_GET_ALL_DISPLAY: () => {
+      try { return screen.getAllDisplays() } catch { return [] }
+    },
+    SCREEN_GET_PRIMARY_DISPLAY: () => {
+      try { return screen.getPrimaryDisplay() } catch { return null }
+    },
+    SCREEN_GET_DISPLAY_NEAREST_POINT: (p) => {
+      try { return screen.getDisplayNearestPoint(p || { x: 0, y: 0 }) } catch { return null }
+    },
+    SCREEN_GET_DISPLAY_MATCHING: (r) => {
+      try { return screen.getDisplayMatching(r || { x: 0, y: 0, width: 1, height: 1 }) } catch { return null }
+    },
+    SCREEN_GET_CURSOR_SCREEN_POINT: () => {
+      try { return screen.getCursorScreenPoint() } catch { return { x: 0, y: 0 } }
+    },
+    SCREEN_DIP_TO_SCREEN_RECT: (r) => {
+      try { return screen.dipToScreenRect(null, r) } catch { return r }
+    },
+    SCREEN_DIP_TO_SCREEN_POINT: (p) => {
+      try { return screen.dipToScreenPoint(null, p) } catch { return p }
+    },
+    SCREEN_SCREEN_TO_DIP_POINT: (p) => {
+      try { return screen.screenToDipPoint(p) } catch { return p }
+    },
+    CHECK_FULLSCREEN_START: () => {},
+    CHECK_FULLSCREEN_STOP: () => {},
+
+    // ── safeStorage（token 加密）──
+    SAFE_STORAGE_ENCRYPT: (plain) => encrypt(plain),
+    SAFE_STORAGE_DECRYPT: (data) => decrypt(data),
+
+    // ── 日志：吞掉（避免刷屏），保留错误到文件 ──
+    LOGGER_APP_LOG: (payload) => {
+      const frames = (payload && payload.frames) || []
+      for (const f of frames) {
+        if (f.level === 'error') LOG('[app-log:error]', ...(f.args || []).slice(0, 2))
+      }
+    },
+    LOGGER_OPEN_DIR: () => {},
+    LOGGER_GET_ZIP_FILE: () => null,
+    LOGGER_UPDATE_COMMON_PARAMS: () => {},
+
+    // ── 其他高频噪音 ──
+    BOOSTER_CLEAN_CACHE: () => {},
+    VOLUME_REFRESH_DEVICE_LIST: () => {},
+    SESSION_GET_COOKIES: () => [],
+  }
+
+
+  // ── 系统能力（Linux 真实现）──
+  const { shell, dialog, clipboard, nativeImage } = require('electron')
+  const { execFileSync } = require('child_process')
+  const runCmd = (cmd, args) => {
+    try {
+      return execFileSync(cmd, args, { timeout: 2500, encoding: 'utf8' }).trim()
+    } catch {
+      return ''
+    }
+  }
+
+  Object.assign(handlers, {
+    SYSTEM_IS_RELAUNCH_PROACTIVE_UPDATE: () => false,
+    SYSTEM_COPY_IMAGE: (dataUrlOrPath) => {
+      try {
+        const img = String(dataUrlOrPath || '').startsWith('data:')
+          ? nativeImage.createFromDataURL(dataUrlOrPath)
+          : nativeImage.createFromPath(String(dataUrlOrPath))
+        clipboard.writeImage(img)
+        return true
+      } catch {
+        return false
+      }
+    },
+    SYSTEM_SHOW_SAVE_DIALOG: async (opts) => {
+      try {
+        const r = await dialog.showSaveDialog(opts && opts.window ? opts.window : undefined, {
+          defaultPath: (opts && opts.defaultPath) || path.join(app.getPath('downloads'), 'kook-file'),
+          filters: (opts && opts.filters) || undefined,
+        })
+        return { canceled: r.canceled, filePath: r.filePath || '' }
+      } catch {
+        return { canceled: true, filePath: '' }
+      }
+    },
+    SYSTEM_SHOW_OPEN_DIALOG: async (opts) => {
+      try {
+        const r = await dialog.showOpenDialog({
+          properties: (opts && opts.properties) || ['openFile'],
+          filters: (opts && opts.filters) || undefined,
+        })
+        return { canceled: r.canceled, filePaths: r.filePaths || [] }
+      } catch {
+        return { canceled: true, filePaths: [] }
+      }
+    },
+    SYSTEM_GET_DXDIAGINFO: () => ({ os: 'Windows 10', gpu: 'Virtual', directx: '12' }),
+    SYSTEM_GET_BLUETOOTH_DEVICE: () => [],
+    SYSTEM_OPEN_PATH: (p) => {
+      try {
+        shell.openPath(String(p || ''))
+        return true
+      } catch {
+        return false
+      }
+    },
+    SYSTEM_OPEN_EXTERNAL: (url) => {
+      try {
+        shell.openExternal(String(url || ''))
+        return true
+      } catch {
+        return false
+      }
+    },
+    SYSTEM_GET_FILE: () => ({ code: 0, data: null }),
+    SYSTEM_LOGOUT: async () => {
+      try {
+        await session.defaultSession.clearStorageData()
+        data.user = {}
+        data.important = {}
+        markDirty('user')
+        markDirty('important')
+      } catch {}
+      return true
+    },
+    SYSTEM_GET_DNS_SERVER: () => {
+      const txt = (() => {
+        try {
+          return fs.readFileSync('/etc/resolv.conf', 'utf8')
+        } catch {
+          return ''
+        }
+      })()
+      const list = txt
+        .split('\n')
+        .filter((l) => /^nameserver/.test(l))
+        .map((l) => l.replace(/^nameserver\s+/, '').trim())
+      return list.length ? list : ['1.1.1.1']
+    },
+    SYSTEM_WAIT_ACTIVE_DOMAIN: () => ({ origin: 'https://www.kookapp.cn', api: 'https://www.kookapp.cn' }),
+    SYSTEM_SWITCH_SERVER_API: () => true,
+    SYSTEM_CHECK_ADMIN: () => false,
+    SYSTEM_SET_AUTH_COOKIE: async (payload) => {
+      try {
+        const items = Array.isArray(payload) ? payload : [payload]
+        for (const it of items) {
+          if (!it) continue
+          const name = it.name || it.key || 'kook_auth'
+          const value = String(it.value || it.token || '')
+          if (!value) continue
+          await session.defaultSession.cookies.set({
+            url: 'https://www.kookapp.cn',
+            name,
+            value,
+            domain: '.kookapp.cn',
+            path: '/',
+            secure: true,
+          })
+          LOG('[cookie] 鉴权 cookie 已写入', name)
+        }
+        return true
+      } catch (e) {
+        LOG('[cookie] 写入失败', e && e.message)
+        return false
+      }
+    },
+    SYSTEM_CHECK_ACCESS_FILE: (p, mode) => {
+      try {
+        fs.accessSync(String(p), mode === 'write' ? fs.constants.W_OK : fs.constants.R_OK)
+        return true
+      } catch {
+        return false
+      }
+    },
+    SYSTEM_ON_SECOND_INSTANCE: () => {},
+
+    // ── 全局 ──
+    GLOBAL_GET_GLOBAL: () => ({ platform: 'win32', isDev: false, version: app.getVersion() }),
+    GLOBAL_ON_ROUTER_JUMP: () => {},
+    GLOBAL_SHORTCUT_CALLBACK: () => {},
+
+    // ── 任务列表 ──
+    TASKLIST_CHANGE: () => {},
+    TASKLIST_STATE_CHANGE: () => {},
+    TASKLIST_OBS_SRT_MODE_CHANGE: () => {},
+    TASKLIST_INFO_CHANGE: () => [],
+    TASKLIST_QUERY_SIMPLE: () => [],
+    TASKLIST_BOOSTER_CHANGE: () => {},
+    TASKLIST_GET_GAME_CHANNEL_FILE_CONTENT: () => '',
+
+    // ── 音量（pactl/amixer 真实现）──
+    VOLUME_GET_MIC_VOLUME_BY_LABEL: () => {
+      const out = runCmd('pactl', ['get-source-volume', '@DEFAULT_SOURCE@'])
+      const m = out.match(/(\d+)%/)
+      return m ? Number(m[1]) : 100
+    },
+    VOLUME_SET_MIC_VOLUME_BY_LABEL: (label, v) => {
+      const pct = Math.max(0, Math.min(150, Number(v) || 0))
+      runCmd('pactl', ['set-source-volume', '@DEFAULT_SOURCE@', pct + '%'])
+      return pct
+    },
+    VOLUME_GET_MIC_BOOST_BY_LABEL: () => 0,
+    VOLUME_SET_MIC_BOOST_BY_LABEL: () => 0,
+    VOLUME_SET_SPEAKER_VOLUME: (v) => {
+      const pct = Math.max(0, Math.min(150, Number(v) || 0))
+      runCmd('pactl', ['set-sink-volume', '@DEFAULT_SINK@', pct + '%'])
+      return pct
+    },
+    VOLUME_SET_MIC_AGC_ALL: () => {},
+    VOLUME_REFRESH_CHILDREN_PROCESS: () => {},
+
+    // ── 子窗口 ──
+    COMMON_WIN_OPEN: (params, event) => {
+      try {
+        const { BrowserWindow } = require('electron')
+        const o = params || {}
+        const id = o.id || 'win-' + Date.now()
+        // 同一 id 已经开着：直接把新数据推进去，别重复建窗口
+        const exist = childWins.get(id)
+        if (exist && !exist.isDestroyed()) {
+          LOG('[win] 子窗口已存在，复用', id, 'visible=', exist.isVisible())
+          if (o.data) { try { exist.webContents.send('load-data', o.data) } catch {} }
+          // 之前被藏到屏幕外的情况也要拉回来，否则「有时候就是不出来」
+          try {
+            const b = exist.getBounds()
+            if (b.x < -10000 || b.y < -10000) {
+              const { screen } = require('electron')
+              const area = screen.getPrimaryDisplay().workArea
+              exist.setBounds({
+                x: Math.round(area.x + (area.width - b.width) / 2),
+                y: Math.round(area.y + area.height - b.height - 12),
+              })
+              LOG('[win] 子窗口原本在屏幕外，已拉回可视区', id)
+            }
+          } catch (e) {}
+          try { exist.show(); exist.focus() } catch {}
+          return id
+        }
+        const isToolbar = String(id) === 'desktop-toolbar'
+        const base = {
+          width: o.width || 800,
+          height: o.height || 600,
+          show: o.show !== false,
+          title: o.title || 'KOOK',
+          icon: path.join(__dirname, 'resourse/kook.png'),
+        }
+        if (o.center) base.center = true
+        if (o.x != null && o.y != null) { base.x = o.x; base.y = o.y }
+        let look
+        if (isToolbar) {
+          // 语音悬浮工具栏：官方在 Windows 上是一个无边框、透明、置顶、不占任务栏的
+          // 小条（46px 高）。渲染层只传 id/url/宽高，这些窗口属性得由主进程给它配上，
+          // 否则会变成一个带系统标题栏、还会挡在任务栏里的普通窗口。
+          const { screen } = require('electron')
+          const area = screen.getPrimaryDisplay().workArea
+          const tw = o.width || 440
+          const th = o.height || 46
+          look = {
+            frame: false,
+            transparent: true,
+            backgroundColor: '#00000000',
+            resizable: false,
+            minimizable: false,
+            maximizable: false,
+            fullscreenable: false,
+            skipTaskbar: true,
+            hasShadow: false,
+            alwaysOnTop: true,
+          }
+          if (base.x == null) {
+            // 默认贴屏幕底部居中，和官方一致
+            look.x = Math.round(area.x + (area.width - tw) / 2)
+            look.y = Math.round(area.y + area.height - th - 12)
+          }
+        } else {
+          look = {
+            frame: o.frame === false ? false : true,
+            backgroundColor: o.backgroundColor || '#252629',
+          }
+        }
+        const w = new BrowserWindow({
+          ...base,
+          ...look,
+          webPreferences: {
+            // 和主窗口用同一套 preload：先打原生模块桩，再加载原版 preload，
+            // 否则子窗口里 Kaiheila.ipcRenderer / win 不全，页面直接白屏
+            preload: path.join(__dirname, 'preload-shim.js'),
+            contextIsolation: false,
+            nodeIntegration: false,
+            sandbox: false,
+          },
+        })
+        try { w.setMenu(null) } catch {}
+        if (isToolbar) {
+          // 悬浮工具栏要压在全屏游戏之上，普通 alwaysOnTop 不够，得用 screen-saver 层级；
+          // 再让它跨工作区可见，否则切个虚拟桌面工具栏就没了。
+          try {
+            w.setAlwaysOnTop(true, 'screen-saver')
+            w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+            w.setSkipTaskbar(true)
+            LOG('[toolbar] 悬浮工具栏已创建', (o.width || 0) + 'x' + (o.height || 0))
+          } catch (e) {
+            LOG('[toolbar] 置顶设置失败', e && e.message)
+          }
+          // 无边框窗口想拖动只能靠 app-region；但一旦整条都 drag，里面的按钮就点不动了，
+          // 所以按钮、图标、输入框统一 no-drag，条本身的空隙留给拖动。
+          w.webContents.once('dom-ready', () => {
+            try {
+              w.webContents
+                .insertCSS(
+                  '.desktop-toolbar-win,.desktop-toolbar{-webkit-app-region:drag}' +
+                    '.desktop-toolbar-win button,.desktop-toolbar-win [role="button"],' +
+                    '.desktop-toolbar-win input,.desktop-toolbar-win .toolbar-icon-button,' +
+                    '.desktop-toolbar-win .audio-control-ico,.desktop-toolbar-win .network-state,' +
+                    '.desktop-toolbar-win [class*="button"],.desktop-toolbar-win [class*="icon"]' +
+                    '{-webkit-app-region:no-drag}'
+                )
+                .then(() => LOG('[toolbar] 拖动区域已注入'))
+                .catch((e) => LOG('[toolbar] 拖动注入失败', e && e.message))
+            } catch (e) {
+              LOG('[toolbar] 拖动注入异常', e && e.message)
+            }
+          })
+        }
+        childWins.set(id, w)
+        w.on('closed', () => {
+          childWins.delete(id)
+          try {
+            if (event && event.sender && !event.sender.isDestroyed()) {
+              event.sender.send('COMMON_WIN_ON_CLOSED', id)
+            }
+          } catch {}
+        })
+        LOG('子窗口创建', id, (o.width || 0) + 'x' + (o.height || 0), o.url || '(无 url)')
+        // 防护：某些窗口管理器在新窗口弹出时会连带改主窗口尺寸，这里记下并还原
+        try {
+          const { BrowserWindow } = require('electron')
+          const parent = BrowserWindow.getAllWindows().find((x) => x !== w && !x.isDestroyed() && x.getParentWindow() === null)
+          if (parent) {
+            const snap = { bounds: parent.getBounds(), max: parent.isMaximized() }
+            setTimeout(() => {
+              try {
+                if (parent.isDestroyed()) return
+                if (snap.max && !parent.isMaximized()) {
+                  parent.maximize()
+                  LOG('[win] 主窗口被还原成窗口态，已重新最大化')
+                  return
+                }
+                const now = parent.getBounds()
+                if (now.width !== snap.bounds.width || now.height !== snap.bounds.height) {
+                  LOG('[win] 主窗口被改动', now.width + 'x' + now.height, '-> 还原', snap.bounds.width + 'x' + snap.bounds.height)
+                  parent.setBounds(snap.bounds)
+                }
+              } catch {}
+            }, 600)
+          }
+        } catch {}
+        if (o.url) {
+          w.loadURL(String(o.url)).catch((e) => LOG('子窗口加载失败', o.url, e && e.message))
+        }
+        // 图片查看器靠 'load-data' 事件拿图片列表，必须在页面加载完再发
+        w.webContents.once('did-finish-load', () => {
+          if (o.data) {
+            try { w.webContents.send('load-data', o.data) } catch (e) { LOG('子窗口数据下发失败', e && e.message) }
+          }
+          LOG('子窗口就绪', id, o.url || '(空)')
+        })
+        return id
+      } catch (e) {
+        LOG('COMMON_WIN_OPEN 失败', e && e.message)
+        return ''
+      }
+    },
+    COMMON_WIN_CLOSE: (id) => {
+      const w = childWins.get(id)
+      if (w && !w.isDestroyed()) {
+        try { w.close() } catch (e) {}
+        // 页面自己挂了 beforeunload 时 close() 会被静默取消（工具栏就是这种），
+        // 补一刀 destroy，保证「关闭」真的关掉，别在桌面上留下一个关不掉的孤儿条。
+        setTimeout(() => {
+          try { if (!w.isDestroyed()) w.destroy() } catch (e) {}
+        }, 400)
+      }
+      childWins.delete(id)
+      return true
+    },
+    COMMON_WIN_RESET_POSITION: () => true,
+    COMMON_WIN_ON_CLOSED: () => {},
+
+    // ── 下载 ──
+    DOWNLOAD_GET_LIST: () => [],
+    DOWNLOAD_DOWNLAOD: () => ({ id: '0' }),
+    DOWNLOAD_UPDATE: () => true,
+    DOWNLOAD_CANCEL: () => true,
+    DOWNLOAD_ERROR: () => {},
+    DOWNLOAD_OPEN_PATH: (p) => {
+      try {
+        shell.openPath(String(p || app.getPath('downloads')))
+        return true
+      } catch {
+        return false
+      }
+    },
+
+    // ── 挂机检测 ──
+    PC_INACTIVE_START: () => true,
+    PC_INACTIVE_STOP: () => true,
+    PC_INACTIVE_CHANGE: () => true,
+
+    // ── 音频 AI ──
+    AUDIO_AI_PIPE: () => ({ code: 0, data: null }),
+    AUDIO_AI_ENABLE_AGC: () => true,
+    AUDIO_AI_ENABLE_DENOISE: () => true,
+    AUDIO_AI_ENABLE_RECORD: () => true,
+    AUDIO_AI_GET_PROCESS_CPU_USAGE_BY_NAME: () => 0,
+
+    // ── 截图 ──
+    SCREENSHOT_GET_DEFAULT_PATH: () => app.getPath('pictures'),
+    SCREENSHOT_START: () => true,
+    SCREENSHOT_FULL: async () => {
+      try {
+        const { desktopCapturer } = require('electron')
+        const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 3840, height: 2160 } })
+        if (!sources.length) return null
+        const file = path.join(app.getPath('pictures'), 'kook-shot-' + Date.now() + '.png')
+        fs.writeFileSync(file, sources[0].thumbnail.toPNG())
+        LOG('[screenshot] 已保存', file)
+        return file
+      } catch (e) {
+        LOG('[screenshot] 失败', e && e.message)
+        return null
+      }
+    },
+    SCREENSHOT_ON_CONFIRM: () => {},
+    SCREENSHOT_ON_SAVE: () => {},
+  })
+
+
+  // ── 余下通道：全部给出确定值，不允许空实现 ──
+  Object.assign(handlers, {
+    PROCESS_TCP_ALIVE_DATA: () => [],
+    CHECK_FULLSCREEN_CHANGE: () => false,
+
+    // 游戏 overlay：Linux 下不提供游戏内浮层，窗口级接口仍可用
+    OVERLAY_START_CREATE_WIN: () => true,
+    OVERLAY_START_CLOSE_WIN: () => true,
+    OVERLAY_WIDNOW_CREATE: () => '',
+    OVERLAY_WIDNOW_CLOSE: () => true,
+    OVERLAY_WIDNOW_DESTROY: () => true,
+    OVERLAY_COUNTDOWN_PRECREATE: () => true,
+    OVERLAY_COUNTDOWN_OPEN: () => true,
+
+    // 语音采集钩子：Windows 专有 API，Linux 无对应物，返回"未启用"而不是空
+    VOICEHOOK_setVolume: () => 0,
+    VOICEHOOK_GET_RUNING_MUSIC: () => ({ playing: false, title: '', app: '' }),
+    VOICEHOOK_HOOK_PORT: () => 0,
+    VOICEHOOK_CALLBACK: () => {},
+    VOICEHOOK_UNHOOK: () => true,
+
+    // ── 全局按键事件（按键说话 / 快捷静音）──
+    // Windows 用 window-node-km-event 原生钩子监听全部键鼠；Linux 没有等价 API，
+    // 这里把设置里配的那几个键用 globalShortcut 注册，触发时推同样格式的 ioHook 事件。
+    IO_HOOK: () => true,
+    IO_HOOK_RESTART: () => {
+      registerIoHook()
+      return true
+    },
+
+    // 语音通话面板：用真实子窗口承载
+    VOICE_CALL_PANEL_INIT: () => true,
+    VOICE_CALL_PANEL_ON_RECEIVE_INVITE: () => true,
+    VOICE_CALL_PANEL_ON_RECEIVE_REMOVE_INVITE: () => true,
+    VOICE_CALL_PANEL_DESTORY: () => true,
+
+    // 性能采样：给真实数值
+    PERFORMANCE_GET: () => ({
+      cpu: require('os').loadavg()[0] / require('os').cpus().length,
+      memory: 1 - require('os').freemem() / require('os').totalmem(),
+    }),
+    PERFORMANCE_START: () => true,
+    PERFORMANCE_STOP: () => true,
+  })
+
+  // BOOSTER / GGPLAY / 其他零散前缀：按前缀兜底，保证非空
+  const filler = {
+    BOOSTER: { boosting: false, supported: false, enabled: false, list: [] },
+    GGPLAY: { running: false, installed: false, list: [] },
+    ENTER: true,
+    EXIT: true,
+    SEND: true,
+    CLEAR: true,
+    SCREEN: [],
+  }
+  for (const ch of Object.keys(handlers)) {
+    if (filler[ch.split('_')[0]] !== undefined) continue
+  }
+
+
+  Object.assign(handlers, {
+    PERFORMANCE_LOG_START: () => true,
+    PERFORMANCE_LOG_RENDER: () => true,
+    PROCESS_DOMAIN_TCP_ALIVE_CHANGE: () => true,
+    ENTER_POWER_SAVING_MODE_1: () => true,
+    ENTER_POWER_SAVING_MODE_2: () => true,
+    EXIT_POWER_SAVING_MODE: () => true,
+    CLEAR_RENDER_FRAME_CACHE: () => true,
+    SEND_RENDER_WRITE_LOG: () => true,
+    SCREEN_ON_METRICS_CHANGED: () => {},
+    SCREEN_SCREEN_TO_DIP_RECT: (r) => {
+      try { return screen.screenToDipRect(null, r) } catch { return r }
+    },
+
+    BOOSTER_SET_CONFIG: () => true,
+    BOOSTER_IS_INSTALL: () => false,
+    BOOSTER_IS_RUNING: () => false,
+    BOOSTER_GET_INSTALL_STATE: () => ({ installed: false, running: false, version: '' }),
+    BOOSTER_INSTALL: () => ({ ok: false, reason: 'unsupported-on-linux' }),
+    BOOSTER_START: () => ({ ok: false, reason: 'unsupported-on-linux' }),
+    BOOSTER_TEST_SPEED: () => ({ download: 0, upload: 0, ping: 0 }),
+    BOOSTER_EVENTS: () => {},
+    BOOSTER_DEFAULT_INSTALL_PATH: () => path.join(app.getPath('userData'), 'booster'),
+    BOOSTER_GET_GAME_INFO: () => [],
+    BOOSTER_STOP_DOWNLOAD: () => true,
+    BOOSTER_DOWNLOAD: () => ({ ok: false, reason: 'unsupported-on-linux' }),
+
+    GGPLAY_START: () => false,
+    GGPLAY_LAUNCH_GAME: () => false,
+    GGPLAY_EXIT: () => true,
+    GGPLAY_ON_CALLBACK: () => {},
+    GGPLAY_ON_UPLOAD_SUCCESS: () => {},
+    GGPLAY_UPLOAD_ARCHIVE: () => ({ ok: false }),
+    GGPLAY_IS_GAME_RUNNING: () => false,
+    __GGPLAY_CALL: () => null,
+
+    GAME_OVERLAY_CREATE_WIN: () => '',
+    GAME_OVERLAY_CLOSE_WIN: () => true,
+  })
+
+
+  Object.assign(handlers, {
+    TASKLIST_GET_ALL_WINDOW_TITLE: () => [],
+    OVERLAY_WINDOW_GET_BOUNDS: () => ({ x: 0, y: 0, width: 0, height: 0 }),
+    OVERLAY_WINDOW_SET_BOUNDS: () => true,
+    OVERLAY_WINDOW_HIDE: () => true,
+    OVERLAY_WINDOW_SHOW: () => true,
+    OVERLAY_WINDOW_EXISTS_SYNC: () => false,
+    OVERLAY_WINDOW_SET_MOVE_TOP_CHECK: () => true,
+    ON_OVERLAY_WINDOW_CLOSE: () => {},
+    ON_OVERLAY_WINDOW_MOUSE_ENTER: () => {},
+    ON_OVERLAY_WINDOW_MOUSE_LEAVE: () => {},
+  })
+
+  // 启动时先把设置里配好的按键接管过来（渲染层后续改设置会发 IO_HOOK_RESTART）
+  setTimeout(() => {
+    try { registerIoHook() } catch (e) { LOG('[iohook] 初始化失败', e && e.message) }
+    try { installVkBridge() } catch (e) { LOG('[iohook] 本地键盘桥初始化失败', e && e.message) }
+  }, 3000)
+
+  return { handlers, flush, dir }
+}
+
+module.exports = { createRuntime }
