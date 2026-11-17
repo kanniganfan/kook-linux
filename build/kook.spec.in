@@ -2,8 +2,8 @@ Name:           kook
 Version:        __VERSION__
 Release:        1
 Summary:        KOOK Linux 客户端
-License:        MIT
-URL:            https://github.com/
+License:        __LICENSE__
+URL:            __URL__
 Vendor:         KANNI
 Packager:       KANNI <cylqm@qq.com>
 BuildArch:      x86_64

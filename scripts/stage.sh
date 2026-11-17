@@ -38,24 +38,31 @@ rsync -a \
 echo "==> 覆盖移植层补丁"
 rsync -a "$ROOT/patches/" "$STAGE/"
 
-echo "==> 修正 package.json（版本 / 入口 / 名称）"
+echo "==> 修正 package.json（版本 / 入口 / 名称 / 元信息）"
 VERSION="$(node -p "require('$ROOT/package.json').version")"
-node - "$STAGE/package.json" "$VERSION" <<'NODE'
+node - "$STAGE/package.json" "$VERSION" "$ROOT/package.json" <<'NODE'
 const fs = require('fs')
-const [file, version] = process.argv.slice(2)
+const [file, version, rootFile] = process.argv.slice(2)
 const pkg = JSON.parse(fs.readFileSync(file, 'utf8'))
+const root = JSON.parse(fs.readFileSync(rootFile, 'utf8'))
 pkg.name = 'kook'
 pkg.version = version
 pkg.main = 'main.js'
 pkg.description = 'KOOK Linux 原生移植版'
-pkg.author = { name: 'KANNI', email: 'cylqm@qq.com' }
-pkg.homepage = 'https://github.com/'
+// 元信息统一从仓库根 package.json 取：electron-builder 生成 deb/rpm 控制文件时
+// 读的是「被打包的 app 目录」里的这个 package.json，不是构建配置那份。
+// 写死在这里会直接变成包里的 Homepage / License 字段（之前就是 https://github.com/ 和 unknown）。
+pkg.author = root.author || { name: 'KANNI', email: 'cylqm@qq.com' }
+pkg.homepage = root.homepage || ''
+if (root.repository) pkg.repository = root.repository
+pkg.license = root.license || 'MIT'
 // electron-builder 会照 dependencies 去重装原生模块，这里必须清空：
 // 依赖已经在 node_modules 里了，重装只会把可用的版本换坏。
 pkg.dependencies = {}
 pkg.devDependencies = {}
 fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n')
 console.log('    version=' + version + ' main=' + pkg.main)
+console.log('    homepage=' + pkg.homepage + ' license=' + pkg.license)
 NODE
 
 echo "==> 清理 Windows 专用二进制（在 Linux 包里没用，能省几十 MB）"

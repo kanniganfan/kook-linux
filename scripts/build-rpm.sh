@@ -12,6 +12,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNPACKED="$ROOT/dist/linux-unpacked"
 OUT="$ROOT/dist"
 VERSION="$(node -p "require('$ROOT/package.json').version")"
+# 元信息统一从 package.json 取，避免 spec 里再写一遍硬编码的占位地址
+PKG_URL="$(node -p "require('$ROOT/package.json').homepage || ''")"
+PKG_LICENSE="$(node -p "require('$ROOT/package.json').license || 'MIT'")"
 
 if [ ! -x "$UNPACKED/kook-linux" ]; then
   echo "缺少 $UNPACKED，请先执行：bash scripts/build.sh AppImage deb" >&2
@@ -44,7 +47,8 @@ cp -a "$ROOT/build/icons/." "$SRC/icons/"
 # 跨文件系统时自动退回复制。
 cp -al "$UNPACKED" "$SRC/app" 2>/dev/null || cp -a "$UNPACKED" "$SRC/app"
 
-sed "s/__VERSION__/$VERSION/g" "$ROOT/build/kook.spec.in" > "$TOP/SPECS/kook.spec"
+sed -e "s|__VERSION__|$VERSION|g" -e "s|__URL__|$PKG_URL|g" -e "s|__LICENSE__|$PKG_LICENSE|g" \
+  "$ROOT/build/kook.spec.in" > "$TOP/SPECS/kook.spec"
 
 echo "==> rpmbuild -bb"
 "$RPMBUILD" -bb \

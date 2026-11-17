@@ -93,6 +93,8 @@
     },
     "appImage": {
       "artifactName": "${productName}-${version}-${arch}.${ext}"
-    }
+    },
+    "publish": null,
+    "afterPack": "build/afterPack.js"
   }
 }
