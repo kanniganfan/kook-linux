@@ -6,7 +6,7 @@ KOOK 官方 Windows 客户端的 **Linux 原生移植版**。直接运行官方�
 
 - 版本：`v0.0.7`（移植线），基线：官方 PC 客户端 `0.112.0`（构建 `c5af713-kook_3321`）
 - 运行时：Electron 36.7.4 / Chromium 136
-- 移植与适配：KANNI（`@KANNI#0001`）· 邮箱 <cylqm@qq.com>
+- 移植与适配：KANNI（KOOK 昵称 KANNI#0001）· 邮箱 <cylqm@qq.com>
 - 官方项目：[github.com/kaiheila](https://github.com/kaiheila)
 
 > 本项目与 KOOK 官方无关，是社区移植，官方客户端的所有权利归其所有者。
