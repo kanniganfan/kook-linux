@@ -56,10 +56,9 @@ pkg.author = root.author || { name: 'KANNI', email: 'cylqm@qq.com' }
 pkg.homepage = root.homepage || ''
 if (root.repository) pkg.repository = root.repository
 pkg.license = root.license || 'MIT'
-// electron-builder 会照 dependencies 去重装原生模块，这里必须清空：
-// 依赖已经在 node_modules 里了，重装只会把可用的版本换坏。
-pkg.dependencies = {}
-pkg.devDependencies = {}
+// dependencies 必须原样保留：electron-builder 是按这份清单决定往包里拷哪些
+// node_modules 的，清空后它一个都不会拷（早期版本就是这么把 @kookapp/* 和整个
+// 依赖树漏掉的，装完打开一片空白）。重装由 build.npmRebuild=false 阻止，不用清空。
 fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n')
 console.log('    version=' + version + ' main=' + pkg.main)
 console.log('    homepage=' + pkg.homepage + ' license=' + pkg.license)

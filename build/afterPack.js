@@ -16,6 +16,33 @@
 //      squashfs，SUID 位根本设不上去）。
 const fs = require('fs')
 const path = require('path')
+const { execFileSync } = require('child_process')
+
+// 把 .stage/app/node_modules 整份补进包里的 resources/app/node_modules。
+//
+// 为什么必须自己补：electron-builder 只拷 package.json dependencies 声明的那棵树，
+// 而官方客户端的 node_modules 是扁平化安装的，大量传递依赖（call-bind-apply-helpers、
+// get-proto 这一串）没写进任何 package.json。照它的清单拷，@kookapp/electron-local-server
+// 一 require 就断，本地 HTTP 服务起不来 —— 表现就是窗口打开一片空白。
+// 硬链接同步，几百 MB 也是秒级。
+function syncNodeModules(context) {
+  const projectDir = context.packager.projectDir
+  const src = path.join(projectDir, '.stage/app/node_modules')
+  const dst = path.join(context.appOutDir, 'resources/app/node_modules')
+  if (!fs.existsSync(src)) {
+    console.log('  ! .stage/app/node_modules 不存在，跳过依赖同步')
+    return
+  }
+  fs.mkdirSync(dst, { recursive: true })
+  try {
+    execFileSync('cp', ['-alf', src + '/.', dst + '/'], { stdio: 'pipe' })
+  } catch (e) {
+    // 硬链接跨文件系统会失败，退回复制
+    execFileSync('cp', ['-af', src + '/.', dst + '/'], { stdio: 'pipe' })
+  }
+  const n = fs.readdirSync(dst).length
+  console.log(`  • 已同步 node_modules -> resources/app（${n} 个顶层条目）`)
+}
 
 const LAUNCHER = `#!/bin/sh
 # KOOK 启动器（由构建脚本生成，别手改）
@@ -61,6 +88,8 @@ exec "$BIN" $EXTRA "$@"
 
 module.exports = async function afterPack(context) {
   const resources = path.join(context.appOutDir, 'resources')
+
+  syncNodeModules(context)
 
   for (const name of ['app-update.yml', 'app-update.yml.blockmap']) {
     const file = path.join(resources, name)
