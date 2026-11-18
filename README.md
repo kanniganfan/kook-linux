@@ -4,7 +4,7 @@ KOOK 官方 Windows 客户端的 **Linux 原生移植版**。直接运行官方�
 把 Windows 专属的那部分——原生模块、进程枚举、屏幕采集、托盘、全局快捷键、窗口行为——
 在 Linux 上重新实现一遍，**不使用第三方网页套壳**。
 
-- 版本：`v0.0.7`（移植线），基线：官方 PC 客户端 `0.112.0`（构建 `c5af713-kook_3321`）
+- 版本：[![release](https://img.shields.io/github/v/release/kanniganfan/kook-linux?label=release&color=2ea44f)](https://github.com/kanniganfan/kook-linux/releases)（移植线，跟随最新 Release），基线：官方 PC 客户端 `0.112.0`（构建 `c5af713-kook_3321`）
 - 运行时：Electron 36.7.4 / Chromium 136
 - 移植与适配：KANNI（KOOK 昵称 KANNI#0001）· 邮箱 <cylqm@qq.com>
 - 官方项目：[github.com/kaiheila](https://github.com/kaiheila)
