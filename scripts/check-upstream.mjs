@@ -28,7 +28,17 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..')
 const DEFAULT_BASELINE = path.join(REPO, 'patches', 'upstream-baseline.json')
 const PATCH_FILES = ['patches/main.js', 'patches/handlers.js', 'patches/preload-shim.js']
-const SCHEMA = 2
+const SCHEMA = 3
+
+/**
+ * 移植层自己会覆盖/修改的文件。它们与官方原始文件天然不同，
+ * 不能算成「上游漂移」，否则每次跑开发目录都会一片红。
+ * 反过来，如果这些文件某天变得和官方一致了，说明补丁没打上，要报警。
+ */
+const OWN_PATCHED = [
+  'webapp/build/index.htm', // 去掉官方启动资源重试门 + 注入 force-web-runtime
+  'src/preload/auto-launch.js', // XDG 自启替代注册表
+]
 
 /**
  * 契约相关的关键文件：按「逻辑名」登记，避免官方换文件名后对不上。
@@ -89,21 +99,29 @@ function readChannels(app) {
 /** webapp 资源指纹：路径集合与内容分别算，便于区分「改名」和「改内容」 */
 function readWebapp(app) {
   const dir = path.join(app, 'webapp', 'build')
-  const files = walk(dir).map((f) => path.relative(dir, f)).sort()
-  if (!files.length) return { fileCount: 0, totalBytes: 0, pathDigest: null, contentDigest: null }
+  const all = walk(dir).map((f) => path.relative(dir, f)).sort()
+  const ownSet = new Set(OWN_PATCHED.map((p) => p.replace(/^webapp\/build\//, '')))
+  const upstream = all.filter((rel) => !ownSet.has(rel))
+  const own = all.filter((rel) => ownSet.has(rel))
+  if (!all.length) {
+    return { fileCount: 0, totalBytes: 0, pathDigest: null, contentDigest: null, own: {} }
+  }
   const rows = []
   let totalBytes = 0
-  for (const rel of files) {
-    const abs = path.join(dir, rel)
-    const buf = fs.readFileSync(abs)
+  for (const rel of upstream) {
+    const buf = fs.readFileSync(path.join(dir, rel))
     totalBytes += buf.length
     rows.push(`${rel}\u0000${buf.length}\u0000${sha(buf)}`)
   }
+  const ownHashes = {}
+  for (const rel of own) ownHashes[rel] = sha(fs.readFileSync(path.join(dir, rel)))
   return {
-    fileCount: files.length,
+    fileCount: upstream.length,
     totalBytes,
-    pathDigest: sha(files.join('\n')),
+    // 只对官方文件算指纹：移植层自身的改动不算上游漂移
+    pathDigest: sha(upstream.join('\n')),
     contentDigest: sha(rows.join('\n')),
+    own: ownHashes,
   }
 }
 
@@ -204,13 +222,28 @@ function diff(base, cur) {
   const added = [...c].filter((x) => !b.has(x))
   const removed = [...b].filter((x) => !c.has(x))
 
+  const ownSet = new Set(OWN_PATCHED)
   const filesChanged = []
   const filesAdded = []
+  const ownApplied = []
+  const ownAbsent = []
   for (const [f, h] of Object.entries(cur.hashes)) {
     if (!(f in (base.hashes || {}))) filesAdded.push(f)
-    else if (base.hashes[f] !== h) filesChanged.push(f)
+    else if (base.hashes[f] !== h) (ownSet.has(f) ? ownApplied : filesChanged).push(f)
+    else if (ownSet.has(f)) ownAbsent.push(f)
   }
-  const filesRemoved = Object.keys(base.hashes || {}).filter((f) => !(f in cur.hashes))
+  const filesRemoved = Object.keys(base.hashes || {})
+    .filter((f) => !(f in cur.hashes) && !ownSet.has(f))
+
+  // 移植层补丁状态：与官方一致 = 补丁没打上（本目录是官方原始目录，或构建漏了）
+  for (const rel of Object.keys((base.webapp && base.webapp.own) || {})) {
+    const curHash = ((cur.webapp && cur.webapp.own) || {})[rel]
+    const baseHash = base.webapp.own[rel]
+    if (!curHash) ownAbsent.push('webapp/build/' + rel)
+    else if (curHash === baseHash) ownAbsent.push('webapp/build/' + rel)
+    else ownApplied.push('webapp/build/' + rel)
+  }
+  const ownTotal = ownApplied.length + ownAbsent.length
 
   const versionChanged =
     base.version !== cur.version ||
@@ -238,11 +271,14 @@ function diff(base, cur) {
   for (const spec of KEY_FILES) {
     const bk = (base.keyFiles || {})[spec.name] || { paths: [], hashes: {} }
     const ck = cur.keyFiles[spec.name] || { paths: [], hashes: {} }
-    const bset = new Set(bk.paths)
-    const cset = new Set(ck.paths)
-    const pathAdded = ck.paths.filter((p) => !bset.has(p))
-    const pathRemoved = bk.paths.filter((p) => !cset.has(p))
-    const contentChanged = ck.paths.filter((p) => bset.has(p) && bk.hashes[p] !== ck.hashes[p])
+    // 移植层自改文件（如 webapp/build/index.htm）不参与上游漂移判定
+    const bPaths = bk.paths.filter((p) => !ownSet.has(p))
+    const cPaths = ck.paths.filter((p) => !ownSet.has(p))
+    const bset = new Set(bPaths)
+    const cset = new Set(cPaths)
+    const pathAdded = cPaths.filter((p) => !bset.has(p))
+    const pathRemoved = bPaths.filter((p) => !cset.has(p))
+    const contentChanged = cPaths.filter((p) => bset.has(p) && bk.hashes[p] !== ck.hashes[p])
     const missing = ck.paths.length === 0
     if (pathAdded.length || pathRemoved.length || contentChanged.length || missing) {
       keyDrift.push({ name: spec.name, pathAdded, pathRemoved, contentChanged, missing })
@@ -256,6 +292,9 @@ function diff(base, cur) {
     filesAdded,
     filesChanged,
     filesRemoved,
+    ownApplied,
+    ownAbsent,
+    ownTotal,
     brokenRefs,
     webappLegacy,
     webappPathChanged,
@@ -286,8 +325,8 @@ function report(cur, d, base) {
   L.push(`- commitId：${base.commitId} → ${cur.commitId}`)
   L.push(`- IPC 通道：${base.channelCount} → **${cur.channelCount}**`)
   L.push(
-    `- webapp：${base.webapp ? base.webapp.fileCount : '?'} → ${cur.webapp.fileCount} 个文件，` +
-      `${(cur.webapp.totalBytes / 1048576).toFixed(1)} MB`
+    `- webapp：${base.webapp ? base.webapp.fileCount : '?'} → ${cur.webapp.fileCount} 个官方文件，` +
+      `${(cur.webapp.totalBytes / 1048576).toFixed(1)} MB（移植层自改文件已排除：${OWN_PATCHED.length} 个）`
   )
   L.push('')
   if (d.webappLegacy) {
@@ -335,6 +374,18 @@ function report(cur, d, base) {
       for (const p of k.contentChanged) L.push(`- 内容变化：\`${p}\``)
       L.push('')
     }
+  }
+  if (d.ownTotal) {
+    L.push('## 移植层补丁状态')
+    if (d.ownAbsent.length === d.ownTotal) {
+      L.push(`- 本目录是官方原始目录（${d.ownTotal} 个自改文件均与官方一致），适合用来对比上游。`)
+    } else if (d.ownAbsent.length) {
+      L.push(`- 🟠 部分补丁缺失（${d.ownApplied.length}/${d.ownTotal} 已打）：`)
+      for (const p of d.ownAbsent) L.push(`  - \`${p}\` 与官方一致，构建可能漏了`)
+    } else {
+      L.push(`- 已打移植层补丁：${d.ownApplied.length}/${d.ownTotal}（这些文件与官方不同属预期）`)
+    }
+    L.push('')
   }
   if (d.clean) L.push('无需改动移植层。\n')
   L.push('## 建议动作')
