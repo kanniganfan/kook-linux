@@ -8,6 +8,7 @@
 
 [![Release](https://img.shields.io/github/v/release/kanniganfan/kook-linux?label=release&color=2ea44f)](https://github.com/kanniganfan/kook-linux/releases)
 [![Downloads](https://img.shields.io/github/downloads/kanniganfan/kook-linux/total?color=2ea44f)](https://github.com/kanniganfan/kook-linux/releases)
+[![CI](https://github.com/kanniganfan/kook-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/kanniganfan/kook-linux/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/kanniganfan/kook-linux?color=2ea44f)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux-2ea44f?logo=linux&logoColor=white)]()
 [![Electron](https://img.shields.io/badge/Electron-36.7.4-47848f?logo=electron&logoColor=white)]()
@@ -362,6 +363,17 @@ ELECTRON=/path/to/electron bash tests/run-tests.sh
 | 凭据存储（27） | 四态后端判定、`v2:` GCM 往返与**篡改一字节解不出来**、`none` 拒绝落盘、`insecure` 的 `v0:` 确实是 Base64、旧格式迁移重加密 | 真实 Electron（隔离 userData） |
 
 默认态那一组锁的是「不许悄悄改变老用户指纹」，灰度态锁的是「改的时候必须三条通道一起改」，凭据那组锁的是「声称加密就真的加密、声称拒绝就真的不落盘」。
+
+同一套测试在 GitHub Actions 上每次 push / PR 都会跑（见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）：
+
+| Job | 跑什么 |
+|---|---|
+| 静态检查 | 所有 `patches/` 脚本语法、基线 JSON 完整性、版本号三处一致、**跨文件重复注册必须登记** |
+| 单元测试 | `tests/window-size.test.js`（纯 Node，不依赖 Electron） |
+| IPC 处理器 | 在 `xvfb` 无头环境跑真实 Electron，`CREDENTIAL=0` 跳过需要密钥环的那组 |
+| 凭据存储 | 单独起 `gnome-keyring` 提供 Secret Service，跑四态与历史迁移 |
+
+CI 只覆盖移植层自身。`scripts/check-upstream.mjs` 需要官方客户端本体（有版权），不在 CI 里跑——本地升级官方版本后手动执行。
 
 209 个 IPC 通道的实现状态分类见 [docs/IPC-CONTRACT.md](docs/IPC-CONTRACT.md)；Electron 安全配置的实测结论见 [docs/SECURITY.md](docs/SECURITY.md)。
 

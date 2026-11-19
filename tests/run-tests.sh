@@ -64,6 +64,15 @@ E TEST_MODE=gray TEST_USERDATA="$UD_GRAY" TEST_EXPECT_UNIQ="$UNIQ" DISPLAY="${DI
 [ "${PIPESTATUS[0]}" -ne 0 ] && FAIL=1
 
 echo
+if [ "${CREDENTIAL:-1}" = "0" ]; then
+  echo
+  echo "── 4/4 凭据存储：已跳过（CREDENTIAL=0）──"
+  echo
+  [ $FAIL -ne 0 ] && { echo "❌ 有测试未通过"; exit 1; }
+  echo "✅ 前三组全部通过（凭据组跳过）"
+  exit 0
+fi
+
 echo "── 4/4 凭据存储（Electron · 四态 + 历史迁移）──"
 # 每种后端状态一个进程：createRuntime 内 secretState 记忆化，同进程换不了后端。
 # none / insecure 用 PATH=/nonexistent 去掉 secret-tool，模拟"没有密钥环"的机器。
