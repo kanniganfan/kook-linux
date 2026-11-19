@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 静态检查：语法、JSON 完整性、版本一致性 ──
+  static:
+    name: 静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 所有移植层文件语法检查
+        run: |
+          set -e
+          for f in patches/*.js build/*.js tests/*.js scripts/*.mjs; do
+            case "$f" in
+              *.mjs) node --check "$f" ;;
+              *)     node --check "$f" ;;
+            esac
+            echo "ok $f"
+          done
+
+      - name: JSON 与基线完整性
+        run: |
+          node -e "const b=require('./patches/upstream-baseline.json'); if(!Array.isArray(b.channels)||!b.channelCount) throw new Error('基线缺少 channels/channelCount'); if(b.channels.length!==b.channelCount) throw new Error('channelCount 与 channels 长度不一致'); console.log('基线条目', b.channels.length)"
+          node -e "const p=require('./package.json'); console.log('package.json version', p.version)"
+
+      - name: 版本号三处一致
+        run: |
+          V=$(node -p "require('./package.json').version")
+          M=$(grep -oP "PORT_VERSION = 'v\K[^']+" patches/main.js)
+          P=$(grep -oP "PORT_VERSION = 'v\K[^']+" patches/preload-shim.js)
+          echo "package=$V main=$M preload=$P"
+          [ "$V" = "$M" ] && [ "$V" = "$P" ] || { echo "版本号不一致"; exit 1; }
+
+      - name: 注册唯一性（跨文件重复注册必须登记）
+        run: node scripts/check-registration.mjs
+
+  # ── 纯 Node 单测：不依赖 Electron ──
+  unit:
+    name: 单元测试（纯 Node）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node tests/window-size.test.js
+
+  # ── IPC 处理器：真实 Electron + 无头 ──
+  ipc:
+    name: IPC 处理器（Electron 无头）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装 Electron 运行依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libgtk-3-0t64 libnss3 libasound2t64 libgbm1 libatk-bridge2.0-0 \
+            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libpango-1.0-0 libcairo2 libatspi2.0-0 libsecret-1-0
+
+      - name: 安装 Electron 36.7.4
+        run: npm install --no-save --no-audit --no-fund electron@36.7.4
+
+      - name: 窗口尺寸 + IPC 默认态/灰度态
+        run: |
+          xvfb-run -a env CREDENTIAL=0 \
+            ELECTRON="$PWD/node_modules/electron/dist/electron" \
+            bash tests/run-tests.sh
+
+      - name: 反向自检（故意失败必须变红）
+        run: |
+          xvfb-run -a env CREDENTIAL=0 \
+            ELECTRON="$PWD/node_modules/electron/dist/electron" \
+            bash tests/self-check.sh
+
+  # ── 凭据存储：需要 Secret Service，单独起一个 gnome-keyring ──
+  credential:
+    name: 凭据存储（Secret Service）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装 Electron 运行依赖 + 密钥环
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libgtk-3-0t64 libnss3 libasound2t64 libgbm1 libatk-bridge2.0-0 \
+            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libpango-1.0-0 libcairo2 libatspi2.0-0 libsecret-1-0 \
+            gnome-keyring libsecret-tools dbus-x11
+
+      - name: 安装 Electron 36.7.4
+        run: npm install --no-save --no-audit --no-fund electron@36.7.4
+
+      - name: 四态 + 历史迁移
+        run: |
+          xvfb-run -a dbus-run-session -- bash -c '
+            set -e
+            # 起一个无交互的会话密钥环，让 secret-tool 有 Secret Service 可用
+            eval "$(printf "" | gnome-keyring-daemon --unlock --components=secrets 2>/dev/null)" || true
+            export $(printf "GNOME_KEYRING_CONTROL=%s" "${GNOME_KEYRING_CONTROL:-}") 2>/dev/null || true
+            secret-tool store --label=ci-check kook-ci test 1 <<< "probe" || true
+            secret-tool lookup kook-ci test || echo "(secret-service 不可用，keyring 组会失败)"
+            export ELECTRON="$PWD/node_modules/electron/dist/electron"
+            bash tests/run-tests.sh
+          '
