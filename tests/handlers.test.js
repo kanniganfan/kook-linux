@@ -93,6 +93,19 @@ app.whenReady().then(async () => {
     ok('默认：不带 bios/machine（老用户指纹零漂移）', !('bios' in detail) && !('machine' in detail), detail)
   }
 
+  // ── 单一归属与显式失败 ──
+  // 硬件加速由 main.js 的 installDesktopIntegration() 覆盖注册；handlers 里若再出现同名
+  // 空实现，注册顺序一变就会反盖真实实现（P1-4 同类故障），这里把它钉成不变量。
+  ok(
+    '硬件加速不由 handlers 注册（唯一归属 main.js）',
+    !('SYSTEM_GET_HARDWARE_ACCELERATION' in h) && !('SYSTEM_SET_HARDWARE_ACCELERATION' in h),
+    Object.keys(h).filter((k) => k.includes('HARDWARE_ACCELERATION'))
+  )
+  const ai = h.AUDIO_AI_PIPE()
+  ok('AUDIO_AI_PIPE 明确回绝不支持（不再伪成功）', ai && ai.code === -1, ai)
+  // 不调用 LOGGER_OPEN_DIR：它会真的拉起 xdg-open 打开文件管理器，测试里不该有这个副作用
+  ok('LOGGER_OPEN_DIR 是真实实现（函数存在）', typeof h.LOGGER_OPEN_DIR === 'function')
+
   console.log(lines.join('\n'))
   console.log('\n[' + MODE + '] ' + pass + '/' + lines.length + ' 通过')
   if (MODE === 'gray') console.log('DEVICE_UNIQ=' + uniq)

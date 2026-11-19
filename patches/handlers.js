@@ -691,8 +691,10 @@ function createRuntime({ app, LOG }) {
     },
     SYSTEM_GET_ARGV: () => process.argv.slice(1),
     SYSTEM_GET_ACTIVE_DOMAIN: () => domainSnapshot(),
-    SYSTEM_GET_HARDWARE_ACCELERATION: () => true,
-    SYSTEM_SET_HARDWARE_ACCELERATION: () => {},
+    // 硬件加速这两条的归属在 patches/main.js 的 installDesktopIntegration()：
+    // 它在 installStubs() 之后用 removeHandler + handle 覆盖注册，并有真实的
+    // globalPref 读写与 needRestart 语义。这里不要再放同名空实现——一旦注册顺序
+    // 变化，空实现就会反盖真实实现，正好重演 P1-4 那类“开关点了没反应”的故障。
     SYSTEM_GET_MICROPHONE_PERMISSION: () => 'granted',
     SYSTEM_REQUEST_MICROPHONE_PERMISSION: () => 'granted',
     SYSTEM_RELAUNCH: () => {
@@ -789,7 +791,32 @@ function createRuntime({ app, LOG }) {
         if (f.level === 'error') LOG('[app-log:error]', ...(f.args || []).slice(0, 2))
       }
     },
-    LOGGER_OPEN_DIR: () => {},
+    LOGGER_OPEN_DIR: () => {
+      // 原实现是空函数，"打开日志目录"点了没反应。
+      // 优先官方日志目录（app.getPath('logs')），不存在就退回 userData，避免什么都不发生。
+      const candidates = []
+      try { candidates.push(app.getPath('logs')) } catch {}
+      try { candidates.push(path.join(app.getPath('userData'), 'logs')) } catch {}
+      try { candidates.push(app.getPath('userData')) } catch {}
+      for (const dir of candidates) {
+        try {
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+          const { shell } = require('electron')
+          const err = shell.openPath(dir)
+          if (err && typeof err.then === 'function') {
+            return err.then((msg) => {
+              if (msg) LOG('[log] 打开日志目录失败:', msg, dir)
+              return !msg
+            })
+          }
+          LOG('[log] 已打开日志目录:', dir)
+          return true
+        } catch (e) {
+          LOG('[log] 打开日志目录异常:', dir, e && e.message)
+        }
+      }
+      return false
+    },
     LOGGER_GET_ZIP_FILE: () => null,
     LOGGER_UPDATE_COMMON_PARAMS: () => {},
 
@@ -1205,7 +1232,11 @@ function createRuntime({ app, LOG }) {
     PC_INACTIVE_CHANGE: () => true,
 
     // ── 音频 AI ──
-    AUDIO_AI_PIPE: () => ({ code: 0, data: null }),
+    AUDIO_AI_PIPE: () => {
+      // 原来的 {code:0} 会让上层以为 AI 降噪链路建立了：明确回绝，便于 UI 走降级分支
+      LOG('[audio-ai] Linux 移植版未提供音频 AI 处理')
+      return { code: -1, message: 'Linux 移植版未提供音频 AI 处理', data: null }
+    },
     AUDIO_AI_ENABLE_AGC: () => true,
     AUDIO_AI_ENABLE_DENOISE: () => true,
     AUDIO_AI_ENABLE_RECORD: () => true,
