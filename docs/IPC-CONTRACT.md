@@ -54,8 +54,8 @@
 | `SYSTEM_GET_ARGV` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_GET_PCNAME` | `patches/handlers.js` | 见备注 | 伪装值 DESKTOP-K00KPC（风控需要 Windows 机器名形态） |
 | `SYSTEM_GET_SYSTEM_VERSION` | `patches/handlers.js` | 见备注 | 伪装值 10.0.22631（与 systemVersion shim 一致） |
-| `SYSTEM_GET_UNIQUE` | `patches/handlers.js` | 见备注 | 设备指纹：优先 /etc/machine-id，回退持久化随机 UUID，必须返回裸字符串 |
-| `SYSTEM_GET_UNIQUE_DETAIL` | `patches/handlers.js` | 见备注 | ⚠️ 形状不符：官方 webapp 取 bios/machine/device_id，当前只回 {id,type} → bios/machine 为 undefined，仅 device_id 生效 |
+| `SYSTEM_GET_UNIQUE` | `patches/handlers.js` | 见备注 | 设备指纹：默认返回 machineId（md5）；开 KOOK_DEVICE_DETAIL_FULL=1 后返回 device-identity 的 UUID，与 DETAIL 同源 |
+| `SYSTEM_GET_UNIQUE_DETAIL` | `patches/handlers.js` | 见备注 | 两态：默认 {id,type:linux}（线上行为，零漂移）；KOOK_DEVICE_DETAIL_FULL=1 时 {bios,machine,device_id}，且 device_id 与 GET_UNIQUE 同源同值 |
 | `SYSTEM_GET_ACTIVE_DOMAIN` | `patches/handlers.js` | 见备注 | 返回官方形状（activeApiOrigin/activeH5Origin/activeFirstPartyOrigins），旧 {origin,api} 保留兜底；形状来源 preload/runtime-domain.js:21 |
 | `SYSTEM_WAIT_ACTIVE_DOMAIN` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_GET_DNS_SERVER` | `patches/handlers.js` | 见备注 | 真实读取 /etc/resolv.conf |
@@ -303,9 +303,20 @@ WINDOW_IS_MIN WINDOW_IS_VISIBLE
 | `SYSTEM_GET_ACTIVE_DOMAIN` | 原返回 `{origin, api}`，官方读 `activeApiOrigin` / `activeH5Origin` / `activeFirstPartyOrigins` → 取到 `undefined`，一路回落 `config.appServer`，**域名切换从未真正生效** | `src/preload/runtime-domain.js:21`（`selection.activeApiOrigin \|\| config.appServer`） | 已修：返回官方形状，旧键保留兜底 |
 | `SYSTEM_GET_FILE` | 返回 `{code:0,data:null}`：声称成功但无数据 | `patches/handlers.js` 原实现 | 已修：真实 `dialog.showOpenDialog`；**无窗口时返回 `code:-1`**，避免无头环境弹窗挂死 `sendSync` 调用方 |
 | `SYSTEM_SWITCH_SERVER_API` | 恒 `return true`，从未切换 | 原实现 | 已修：白名单 + 写 `linux-store/domain.json` + 重启生效 |
-| `SYSTEM_GET_UNIQUE_DETAIL` | 官方取 `{bios, machine, device_id}`，当前只回 `{id, type:'linux'}` → 前两项为 `undefined`，仅 `device_id` 存活 | `webapp/build/static/js/2557.*.js`：构造请求头时取 `n.bios` / `n.machine` / `n.device_id` | ⚠️ **待决**（动设备指纹可能触发重新登录） |
+| `SYSTEM_GET_UNIQUE_DETAIL` | 官方取 `{bios, machine, device_id}`，原实现只回 `{id, type:'linux'}` → 前两项 `undefined` | `webapp/build/static/js/2557.*.js`：构造请求头时取 `n.bios` / `n.machine` / `n.device_id` | **已实现 · 灰度默认关**（见下方说明） |
 
 结论：新增/修改通道时，**必须回读官方 preload 或 webapp 的实际取值方式**，不能只看通道名对不对。
+
+#### 9.2.1 `GET_UNIQUE_DETAIL` 灰度开关
+
+| 状态 | `SYSTEM_GET_UNIQUE` | `SYSTEM_GET_UNIQUE_DETAIL` |
+|---|---|---|
+| 默认（未设环境变量） | `machineId`（md5，线上行为） | `{id: machineId, type:'linux'}` |
+| `KOOK_DEVICE_DETAIL_FULL=1` | `device-identity` 的 UUID | `{bios, machine, device_id}`，`device_id` 与上一列**同源同值** |
+
+- 两条通道共用同一份进程内记忆化指纹，运行期间不会抖动；开启时打一行 `[device] 灰度开启…`（带三个值）便于对照日志。
+- **开关不是幂等的**：开启后指纹从 `machineId` 变成 UUID，**关回去还会再变一次**，两个方向都可能被服务端判成新设备。真机验证应当「开着跑一轮并保持」，不要来回切。
+- 默认值保证老用户指纹零漂移，这也是它默认关闭的原因。
 
 ## 10. 上游兼容性检测（P2-7）
 
