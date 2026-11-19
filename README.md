@@ -1,5 +1,3 @@
-<div align="center">
-
 # KOOK Linux
 
 **KOOK 官方 Windows 客户端的 Linux 原生移植版**
@@ -15,8 +13,6 @@
 [![Stars](https://img.shields.io/github/stars/kanniganfan/kook-linux?style=social)](https://github.com/kanniganfan/kook-linux/stargazers)
 
 [下载](#安装) · [功能](#功能) · [技术实现](#技术实现) · [常见问题](#常见问题) · [从源码构建](#从源码构建)
-
-</div>
 
 ---
 
