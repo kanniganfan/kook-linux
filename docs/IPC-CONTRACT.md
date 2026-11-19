@@ -21,6 +21,7 @@
 2. **`WINDOW_SET_SIZE_ORIGIN` 已修复**（`1165333`）：此前 `preload/window.js:129` 发 `send` 调用、主进程未注册，落到 catch-all 返回 `{}`，「设置窗口初始尺寸」静默空转；现在按发送方窗口 `setContentSize(w,h)` 真实生效，参数非法直接忽略。官方 `constants.js` 里同时存在正确与错拼两套窗口通道，preload 用的是错拼的 `WINDOW_IS_ALWAY_ON_TOP`（主进程按同名实现，返回值是真的），错拼的 `WINDOW_SET_ALWAY_ON_TOP` 无调用方、属死通道。
 3. **sendSync 全部有回值**（39 条），不存在渲染进程被永久阻塞的通道；这是 preload 护栏 + catch-all 双重保证的结果，改动时不要破坏。
 4. **C 类不是失败**：自动更新、迅游加速、GGPlay 游戏浮层在 Linux 上本来就不该有，返回显式不支持比伪造成功更正确。
+5. **通道存在 ≠ 契约正确**：本轮又修掉三处**形状/语义**问题（`SYSTEM_GET_ACTIVE_DOMAIN` 返回形状、`SYSTEM_GET_FILE` 伪成功、`SYSTEM_SWITCH_SERVER_API` 假切换），其中 `SYSTEM_GET_UNIQUE_DETAIL` 的字段缺失仍未决（见 9.2）。这类问题静态看「通道都注册了」，运行时表现为功能静默不生效。
 
 ## 1. 分类口径
 
@@ -292,6 +293,19 @@ WINDOW_IS_MIN WINDOW_IS_VISIBLE
 | `v0:...` | 显式设置 `KOOK_INSECURE_STORE=1` | 明文，仅调试/救援用，带警告 |
 
 `SAFE_STORAGE_DECRYPT` 向下兼容：Electron 密文、`v2:`、`v0:`、旧版裸 Base64（读到时若已有安全后端会**当场重加密回写**）。
+
+### 9.2 形状契约（字段级对齐）
+
+「通道注册了」和「返回形状对」是两件事。本轮确认的三处：
+
+| 通道 | 问题 | 证据 | 状态 |
+|---|---|---|---|
+| `SYSTEM_GET_ACTIVE_DOMAIN` | 原返回 `{origin, api}`，官方读 `activeApiOrigin` / `activeH5Origin` / `activeFirstPartyOrigins` → 取到 `undefined`，一路回落 `config.appServer`，**域名切换从未真正生效** | `src/preload/runtime-domain.js:21`（`selection.activeApiOrigin \|\| config.appServer`） | 已修：返回官方形状，旧键保留兜底 |
+| `SYSTEM_GET_FILE` | 返回 `{code:0,data:null}`：声称成功但无数据 | `patches/handlers.js` 原实现 | 已修：真实 `dialog.showOpenDialog`；**无窗口时返回 `code:-1`**，避免无头环境弹窗挂死 `sendSync` 调用方 |
+| `SYSTEM_SWITCH_SERVER_API` | 恒 `return true`，从未切换 | 原实现 | 已修：白名单 + 写 `linux-store/domain.json` + 重启生效 |
+| `SYSTEM_GET_UNIQUE_DETAIL` | 官方取 `{bios, machine, device_id}`，当前只回 `{id, type:'linux'}` → 前两项为 `undefined`，仅 `device_id` 存活 | `webapp/build/static/js/2557.*.js`：构造请求头时取 `n.bios` / `n.machine` / `n.device_id` | ⚠️ **待决**（动设备指纹可能触发重新登录） |
+
+结论：新增/修改通道时，**必须回读官方 preload 或 webapp 的实际取值方式**，不能只看通道名对不对。
 
 ## 10. 上游兼容性检测（P2-7）
 
