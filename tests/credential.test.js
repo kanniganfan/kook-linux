@@ -153,6 +153,9 @@ app.whenReady().then(async () => {
     }
   }
 
+  // 自检用：注入一条必失败，验证 runner 以非零退出码结束
+  if (process.env.KOOK_TEST_FORCE_FAIL === '1') ok('自检：注入的故意失败', false, 'KOOK_TEST_FORCE_FAIL=1')
+
   console.log(lines.join('\n'))
   console.log(
     '\n[' + MODE + '] ' + pass + ' 通过 / ' + failed + ' 失败 / ' + skipped + ' 跳过'

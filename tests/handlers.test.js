@@ -106,6 +106,9 @@ app.whenReady().then(async () => {
   // 不调用 LOGGER_OPEN_DIR：它会真的拉起 xdg-open 打开文件管理器，测试里不该有这个副作用
   ok('LOGGER_OPEN_DIR 是真实实现（函数存在）', typeof h.LOGGER_OPEN_DIR === 'function')
 
+  // 自检用：注入一条必失败的断言，验证 runner 会以非零退出码结束（CI 会变红）。
+  if (process.env.KOOK_TEST_FORCE_FAIL === '1') ok('自检：注入的故意失败', false, 'KOOK_TEST_FORCE_FAIL=1')
+
   console.log(lines.join('\n'))
   console.log('\n[' + MODE + '] ' + pass + '/' + lines.length + ' 通过')
   if (MODE === 'gray') console.log('DEVICE_UNIQ=' + uniq)
