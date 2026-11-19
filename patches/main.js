@@ -46,7 +46,13 @@ if (!app.requestSingleInstanceLock()) {
         if (mainWin.isMinimized()) mainWin.restore()
         mainWin.show()
         mainWin.focus()
+        return
       }
+      // 主窗口已销毁但进程还活着：这时的表现就是「双击图标什么也没发生」。
+      // 直接重启一个干净实例，而不是把用户的点击吞掉。
+      LOG('[single-instance] 主窗口已销毁，重启实例')
+      app.relaunch()
+      app.exit(0)
     } catch {}
   })
 }
@@ -2385,6 +2391,46 @@ let mainWin = null
 let tray = null
 let quitForReal = false
 
+// 退出意图必须能穿透「关闭到托盘」的拦截。
+// 之前只有在托盘菜单里点「退出」才会把 quitForReal 置真，于是 SIGTERM、会话注销、
+// 系统级 app.quit() 走到窗口 close 时都会被 preventDefault 拦下，进程永远退不掉
+// （表现出来就是「结束不了 KOOK 进程」）。before-quit 是所有退出路径的必经之地。
+try {
+  app.on('before-quit', () => { quitForReal = true })
+} catch {}
+
+// 终端 Ctrl+C、kill、桌面注销分别对应这三个信号：显式转成退出，别依赖默认行为
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  try {
+    process.on(sig, () => {
+      quitForReal = true
+      try { app.quit() } catch {}
+    })
+  } catch {}
+}
+
+// GNOME 默认没有托盘宿主：Tray 构造能成功，图标却不会出现。
+// 这种情况下「关闭到托盘」等于把窗口藏进一个打不开的地方，所以先探测 D-Bus 上
+// 有没有 StatusNotifierWatcher，没有就不做拦截，关就是关。
+function trayHostAvailable() {
+  if (process.platform !== 'linux') return true
+  try {
+    const { execFileSync } = require('child_process')
+    const out = execFileSync('dbus-send', [
+      '--session',
+      '--dest=org.freedesktop.DBus',
+      '--type=method_call',
+      '--print-reply',
+      '/org/freedesktop/DBus',
+      'org.freedesktop.DBus.NameHasOwner',
+      'string:org.kde.StatusNotifierWatcher',
+    ], { encoding: 'utf8', timeout: 2000 })
+    return /boolean\s+true/.test(out)
+  } catch {
+    return false
+  }
+}
+
 function installDesktopIntegration() {
   const { Tray, Menu, nativeImage } = require('electron')
   const iconPath = path.join(APP_DIR, 'resourse/kook.png')
@@ -2436,6 +2482,11 @@ function installDesktopIntegration() {
   // 托盘：GNOME 要装 AppIndicator 扩展才有图标区；建不起来就当作没有托盘，
   // 「关闭时最小化到托盘」自动失效、关闭按钮照常退出，不会把窗口藏没。
   try {
+    if (!trayHostAvailable()) {
+      tray = null
+      LOG('[desktop] 会话里没有托盘宿主（org.kde.StatusNotifierWatcher 不存在）：不做关闭到托盘拦截')
+      throw new Error('no status notifier host')
+    }
     const img = nativeImage.createFromPath(iconPath)
     tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img.resize({ width: 22, height: 22 }))
     tray.setToolTip('KOOK')
@@ -2450,6 +2501,17 @@ function installDesktopIntegration() {
     tray = null
     LOG('[desktop] 托盘不可用（GNOME 需 AppIndicator 扩展），关闭按钮将直接退出：', e && e.message)
   }
+
+  // 主窗口真的被关掉（没有拦截）时，必须把整个进程带走。
+  // 覆盖层、子窗口等别的 BrowserWindow 还活着时 window-all-closed 不会触发，
+  // 残留进程会一直攥着单实例锁，下次双击图标只会在新进程里立刻 exit(0)。
+  try {
+    mainWin.on('closed', () => {
+      quitForReal = true
+      LOG('[desktop] 主窗口已关闭，退出进程')
+      setTimeout(() => { try { app.quit() } catch {} }, 0)
+    })
+  } catch {}
 
   // 关闭时最小化到托盘：设置里打开且托盘真的存在才拦截，否则关就是关
   try {
