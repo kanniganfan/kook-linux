@@ -42,17 +42,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', () => {
     try {
-      if (mainWin && !mainWin.isDestroyed()) {
-        if (mainWin.isMinimized()) mainWin.restore()
-        mainWin.show()
-        mainWin.focus()
-        return
-      }
-      // 主窗口已销毁但进程还活着：这时的表现就是「双击图标什么也没发生」。
-      // 直接重启一个干净实例，而不是把用户的点击吞掉。
-      LOG('[single-instance] 主窗口已销毁，重启实例')
-      app.relaunch()
-      app.exit(0)
+      showMainWindow()
     } catch {}
   })
 }
@@ -2399,12 +2389,36 @@ try {
   app.on('before-quit', () => { quitForReal = true })
 } catch {}
 
+// 托盘点击、「显示 KOOK」菜单、二次启动都走这里：
+//   - 最小化过必须 restore()，只 show() 唤不回来（show 不取消 minimized）
+//   - 窗口已销毁时不能静默失败，重启一个干净实例
+function showMainWindow() {
+  try {
+    if (mainWin && !mainWin.isDestroyed()) {
+      if (mainWin.isMinimized()) mainWin.restore()
+      mainWin.show()
+      mainWin.focus()
+      return true
+    }
+    LOG('[single-instance] 主窗口不可用，重启实例')
+    app.relaunch()
+    app.exit(0)
+  } catch (e) {
+    LOG('[single-instance] 唤回窗口失败', e && e.message)
+  }
+  return false
+}
+
 // 终端 Ctrl+C、kill、桌面注销分别对应这三个信号：显式转成退出，别依赖默认行为
 for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   try {
     process.on(sig, () => {
       quitForReal = true
       try { app.quit() } catch {}
+      // 兜底：某个渲染进程卡在 beforeunload 上时 app.quit() 会无限期等待，
+      // 3 秒后强退，避免「Ctrl+C / kill 杀不掉」（timer 不引用，不拖住事件循环）
+      const t = setTimeout(() => { try { app.exit(0) } catch {} ; try { process.exit(0) } catch {} }, 3000)
+      if (t && typeof t.unref === 'function') t.unref()
     })
   } catch {}
 }
@@ -2491,11 +2505,11 @@ function installDesktopIntegration() {
     tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img.resize({ width: 22, height: 22 }))
     tray.setToolTip('KOOK')
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: '显示 KOOK', click: () => { try { mainWin.show(); mainWin.focus() } catch {} } },
+      { label: '显示 KOOK', click: () => showMainWindow() },
       { type: 'separator' },
       { label: '退出', click: () => { quitForReal = true; app.quit() } },
     ]))
-    tray.on('click', () => { try { mainWin.show(); mainWin.focus() } catch {} })
+    tray.on('click', () => showMainWindow())
     LOG('[desktop] 托盘已创建')
   } catch (e) {
     tray = null
