@@ -335,6 +335,110 @@ function createRuntime({ app, LOG }) {
   }
   migrateCredentials()
 
+  // ───────────────────────── 服务端域名（真实现，非伪成功）─────────────────────────
+  // 官方 GET_ACTIVE_DOMAIN 的返回形状是 runtime-domain 里用到的 activeApiOrigin /
+  // activeH5Origin / activeFirstPartyOrigins，不是 {origin,api}；
+  // SWITCH_SERVER_API 只在白名单域名之间真的切换并持久化，其余一律拒绝。
+  const originOf = (v) => {
+    try {
+      return new URL(String(v)).origin
+    } catch {
+      return ''
+    }
+  }
+
+  const domainCfg = (() => {
+    const candidates = [
+      path.join(app.getAppPath(), 'src', 'config.json'),
+      path.join(__dirname, '..', 'src', 'config.json'),
+      process.resourcesPath ? path.join(process.resourcesPath, 'app', 'src', 'config.json') : '',
+    ].filter(Boolean)
+    for (const file of candidates) {
+      try {
+        const conf = JSON.parse(fs.readFileSync(file, 'utf8'))
+        if (conf && conf.domainSwitch) return conf.domainSwitch
+      } catch {}
+    }
+    return {}
+  })()
+
+  const DOMAINS = {
+    primary: {
+      api: domainCfg.primaryApiOrigin || 'https://www.kookapp.cn',
+      h5: domainCfg.primaryH5Origin || 'https://m.kookapp.cn',
+    },
+    backup: {
+      api: domainCfg.backupApiOrigin || 'https://www.kookyuyin.cn',
+      h5: domainCfg.backupH5Origin || 'https://m.kookyuyin.cn',
+    },
+  }
+  const DOMAIN_ALLOW = new Set()
+  for (const sel of Object.keys(DOMAINS)) {
+    DOMAIN_ALLOW.add(originOf(DOMAINS[sel].api))
+    DOMAIN_ALLOW.add(originOf(DOMAINS[sel].h5))
+  }
+  for (const pair of domainCfg.firstPartyOriginPairs || []) {
+    DOMAIN_ALLOW.add(originOf(pair.primaryOrigin))
+    DOMAIN_ALLOW.add(originOf(pair.backupOrigin))
+  }
+  DOMAIN_ALLOW.delete('')
+
+  const domainFile = path.join(dir, 'domain.json')
+  let domainSelection = 'primary'
+  try {
+    const saved = JSON.parse(fs.readFileSync(domainFile, 'utf8'))
+    if (saved && (saved.selected === 'backup' || saved.selected === 'primary')) {
+      domainSelection = saved.selected
+    }
+  } catch {}
+
+  function persistDomain() {
+    try {
+      fs.writeFileSync(domainFile, JSON.stringify({ selected: domainSelection }, null, 2))
+      return true
+    } catch (e) {
+      LOG('[domain] 保存域名选择失败:', e && e.message)
+      return false
+    }
+  }
+
+  function domainSnapshot(reason) {
+    const sel = domainSelection
+    const active = DOMAINS[sel] || DOMAINS.primary
+    return {
+      // runtime-domain 读这三项
+      activeApiOrigin: active.api,
+      activeH5Origin: active.h5,
+      activeFirstPartyOrigins: (domainCfg.firstPartyOriginPairs || []).map((pair) => ({
+        primaryOrigin: pair.primaryOrigin,
+        backupOrigin: pair.backupOrigin,
+        activeOrigin: sel === 'backup' ? pair.backupOrigin : pair.primaryOrigin,
+      })),
+      selectedDomain: sel,
+      selectedReason: reason || (sel === 'backup' ? 'manual' : 'primary_healthy'),
+      available: true,
+      backupEnabled: DOMAINS.backup.api !== DOMAINS.primary.api,
+      configVersion: 0,
+      region: '',
+      // 旧形状保留，避免还在按 {origin,api} 读的调用方拿到 undefined
+      origin: active.api,
+      api: active.api,
+    }
+  }
+
+  function pickSwitchTarget(input) {
+    const raw =
+      typeof input === 'string'
+        ? input
+        : input && (input.origin || input.api || input.activeApiOrigin || input.url || input.domain)
+    if (!raw) return ''
+    const asOrigin = originOf(raw)
+    if (asOrigin) return asOrigin
+    // 允许直接传 'primary' / 'backup'
+    if (raw === 'primary' || raw === 'backup') return originOf(DOMAINS[raw].api)
+    return ''
+  }
+
   // 稳定机器标识（首次生成后复用）
   const idFile = path.join(dir, 'machine-id')
   let machineId = ''
@@ -550,10 +654,7 @@ function createRuntime({ app, LOG }) {
     SYSTEM_GET_UNIQUE: () => machineId,
     SYSTEM_GET_UNIQUE_DETAIL: () => ({ id: machineId, type: 'linux' }),
     SYSTEM_GET_ARGV: () => process.argv.slice(1),
-    SYSTEM_GET_ACTIVE_DOMAIN: () => ({
-      origin: 'https://www.kookapp.cn',
-      api: 'https://www.kookapp.cn',
-    }),
+    SYSTEM_GET_ACTIVE_DOMAIN: () => domainSnapshot(),
     SYSTEM_GET_HARDWARE_ACCELERATION: () => true,
     SYSTEM_SET_HARDWARE_ACCELERATION: () => {},
     SYSTEM_GET_MICROPHONE_PERMISSION: () => 'granted',
@@ -727,7 +828,30 @@ function createRuntime({ app, LOG }) {
         return false
       }
     },
-    SYSTEM_GET_FILE: () => ({ code: 0, data: null }),
+    SYSTEM_GET_FILE: async (options) => {
+      // 原实现返回 {code:0,data:null}：声称成功却没有数据。
+      // 这里走真实的原生选择器；打不开就返回 code:-1，不伪装成功。
+      try {
+        const { dialog, BrowserWindow } = require('electron')
+        const opt = options && typeof options === 'object' ? options : {}
+        const properties =
+          Array.isArray(opt.properties) && opt.properties.length ? opt.properties : ['openFile']
+        const dlgOpts = { properties }
+        if (Array.isArray(opt.filters) && opt.filters.length) dlgOpts.filters = opt.filters
+        if (typeof opt.title === 'string' && opt.title) dlgOpts.title = opt.title
+        const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0]
+        // 没有窗口（无头/自动化）时不要去弹原生对话框：那会一直挂住 sendSync 调用方
+        if (!win) return { code: -1, message: '当前没有可用窗口，无法打开文件选择器' }
+        const res = await dialog.showOpenDialog(win, dlgOpts)
+        return {
+          code: 0,
+          data: { canceled: !!(res && res.canceled), filePaths: (res && res.filePaths) || [] },
+        }
+      } catch (e) {
+        LOG('[file] 打开文件选择器失败:', e && e.message)
+        return { code: -1, message: '打开文件选择器失败: ' + (e && e.message) }
+      }
+    },
     SYSTEM_LOGOUT: async () => {
       try {
         await session.defaultSession.clearStorageData()
@@ -752,8 +876,30 @@ function createRuntime({ app, LOG }) {
         .map((l) => l.replace(/^nameserver\s+/, '').trim())
       return list.length ? list : ['1.1.1.1']
     },
-    SYSTEM_WAIT_ACTIVE_DOMAIN: () => ({ origin: 'https://www.kookapp.cn', api: 'https://www.kookapp.cn' }),
-    SYSTEM_SWITCH_SERVER_API: () => true,
+    SYSTEM_WAIT_ACTIVE_DOMAIN: () => domainSnapshot('waited'),
+    SYSTEM_SWITCH_SERVER_API: (input) => {
+      const target = pickSwitchTarget(input)
+      if (!target) {
+        LOG('[domain] 切换被拒绝：无法解析目标', JSON.stringify(input))
+        return false
+      }
+      if (!DOMAIN_ALLOW.has(target)) {
+        LOG('[domain] 切换被拒绝：非白名单域名', target)
+        return false
+      }
+      const next =
+        target === originOf(DOMAINS.backup.api) || target === originOf(DOMAINS.backup.h5)
+          ? 'backup'
+          : 'primary'
+      if (next === domainSelection) {
+        LOG('[domain] 已在该域名，无需切换:', next, target)
+        return true
+      }
+      domainSelection = next
+      const saved = persistDomain()
+      LOG('[domain] 已切换:', next, target, saved ? '（已持久化）' : '（本次生效，持久化失败）')
+      return true
+    },
     SYSTEM_CHECK_ADMIN: () => false,
     SYSTEM_SET_AUTH_COOKIE: async (payload) => {
       try {

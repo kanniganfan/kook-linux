@@ -9,10 +9,10 @@
 
 | 类别 | 数量 | 含义 |
 |---|---:|---|
-| **A 已完整实现** | 89 | 走 Electron 跨平台 API 或真实系统调用，语义与 Windows 版等价 |
+| **A 已完整实现** | 91 | 走 Electron 跨平台 API 或真实系统调用，语义与 Windows 版等价 |
 | **B Linux 替代实现** | 33 | 用 `/proc`、`pactl`、`globalShortcut`、`desktopCapturer`、独立窗口等替代 Windows 专有机制 |
 | **C 明确不支持** | 27 | 返回显式的「不支持」语义，前端能识别，不会假装成功 |
-| **D 临时兼容桩** | 60 | 返回常量占位，界面不报错但功能不生效（**风险集中区**） |
+| **D 临时兼容桩** | 58 | 返回常量占位，界面不报错但功能不生效（**风险集中区**） |
 | 合计 | **209** | 与官方 `constants.js` 的 `IPCEventName` 一一对应 |
 
 四条需要先知道的结论：
@@ -30,7 +30,7 @@
 - **D 临时兼容桩**：为了让界面继续渲染而返回常量。**默认安全但语义空洞**，任何依赖其结果的新功能都会静默失效。
 - **E 尚未验证**（横切视图，见第 6 节）：实现存在，但只在部分环境（X11/Wayland、有无密钥环、有无 PipeWire）验证过，**不是独立主类**，避免一条通道被重复计入两个桶。
 
-## 2. A 类 · 已完整实现（89 条）
+## 2. A 类 · 已完整实现（91 条）
 
 | 通道 | 实现位置 | 行为/返回 | 备注 |
 |---|---|---|---|
@@ -54,8 +54,8 @@
 | `SYSTEM_GET_PCNAME` | `patches/handlers.js` | 见备注 | 伪装值 DESKTOP-K00KPC（风控需要 Windows 机器名形态） |
 | `SYSTEM_GET_SYSTEM_VERSION` | `patches/handlers.js` | 见备注 | 伪装值 10.0.22631（与 systemVersion shim 一致） |
 | `SYSTEM_GET_UNIQUE` | `patches/handlers.js` | 见备注 | 设备指纹：优先 /etc/machine-id，回退持久化随机 UUID，必须返回裸字符串 |
-| `SYSTEM_GET_UNIQUE_DETAIL` | `patches/handlers.js` | 见备注 | 指纹明细（bios/machine/device_id），服务端风控取数源 |
-| `SYSTEM_GET_ACTIVE_DOMAIN` | `patches/handlers.js` | 见备注 |  |
+| `SYSTEM_GET_UNIQUE_DETAIL` | `patches/handlers.js` | 见备注 | ⚠️ 形状不符：官方 webapp 取 bios/machine/device_id，当前只回 {id,type} → bios/machine 为 undefined，仅 device_id 生效 |
+| `SYSTEM_GET_ACTIVE_DOMAIN` | `patches/handlers.js` | 见备注 | 返回官方形状（activeApiOrigin/activeH5Origin/activeFirstPartyOrigins），旧 {origin,api} 保留兜底；形状来源 preload/runtime-domain.js:21 |
 | `SYSTEM_WAIT_ACTIVE_DOMAIN` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_GET_DNS_SERVER` | `patches/handlers.js` | 见备注 | 真实读取 /etc/resolv.conf |
 | `SYSTEM_LOGOUT` | `patches/handlers.js` | 见备注 | 清 session 存储 + 清 user/important 两套持久化 |
@@ -66,6 +66,8 @@
 | `SYSTEM_SHOW_OPEN_DIALOG` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_OPEN_PATH` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_OPEN_EXTERNAL` | `patches/handlers.js` | 见备注 |  |
+| `SYSTEM_GET_FILE` | `patches/handlers.js` | 见备注 | 真实 dialog.showOpenDialog；无窗口直接返回 code:-1（避免挂死 sendSync 调用方） |
+| `SYSTEM_SWITCH_SERVER_API` | `patches/handlers.js` | 见备注 | 返回 true 但未真正切换域名（domain-switch 由 SYSTEM_GET_ACTIVE_DOMAIN 承担） |
 | `SYSTEM_RELAUNCH` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_GET_HARDWARE_ACCELERATION` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_SET_HARDWARE_ACCELERATION` | `patches/handlers.js` | 见备注 |  |
@@ -194,7 +196,7 @@
 | `SYSTEM_GET_BLUETOOTH_DEVICE` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_CHECK_ADMIN` | `patches/handlers.js` | `false` | 恒 false（Linux 无管理员令牌概念） |
 
-## 5. D 类 · 临时兼容桩（60 条）
+## 5. D 类 · 临时兼容桩（58 条）
 
 以下通道返回常量，界面正常但功能不生效。**按前缀聚类**，同一簇行为一致：
 
@@ -219,10 +221,10 @@
 | `WINDOW_SET_ALWAY_ON_TOP` | catch-all `{}` | 官方错拼死通道，preload 无调用方，保留现状即可 |
 | `SYSTEM_GET_FILE` `SYSTEM_SWITCH_SERVER_API` `__GGPLAY_CALL` | `{code:0,data:null}` / `true` / `null` | 伪成功：取文件、切域名实际未发生 |
 
-D 类完整名单（60 条，供 grep 对账）：
+D 类完整名单（58 条，供 grep 对账）：
 
 ```
-GLOBAL_GET_GLOBAL GLOBAL_ON_ROUTER_JUMP STORE_AUTH_BACKFILL_COOKIE STORE_IS_AUTH_COOKIE_MISSING LOGGER_OPEN_DIR LOGGER_GET_ZIP_FILE LOGGER_UPDATE_COMMON_PARAMS PROCESS_TCP_ALIVE_DATA CHECK_FULLSCREEN_START CHECK_FULLSCREEN_STOP CHECK_FULLSCREEN_CHANGE SYSTEM_GET_FILE SYSTEM_SWITCH_SERVER_API SYSTEM_ON_SECOND_INSTANCE GLOBAL_SHORTCUT_CALLBACK VOLUME_SET_MIC_AGC_ALL VOLUME_REFRESH_CHILDREN_PROCESS VOLUME_REFRESH_DEVICE_LIST WINDOW_SET_ALWAY_ON_TOP COMMON_WIN_RESET_POSITION COMMON_WIN_ON_CLOSED AUDIO_AI_PIPE AUDIO_AI_ENABLE_AGC AUDIO_AI_ENABLE_DENOISE AUDIO_AI_GET_PROCESS_CPU_USAGE_BY_NAME AUDIO_AI_ENABLE_RECORD DOWNLOAD_GET_LIST DOWNLOAD_DOWNLAOD DOWNLOAD_CANCEL DOWNLOAD_ERROR DOWNLOAD_OPEN_PATH PC_INACTIVE_START PC_INACTIVE_STOP PC_INACTIVE_CHANGE SCREENSHOT_START SCREENSHOT_ON_CONFIRM SCREENSHOT_ON_SAVE VOICE_CALL_PANEL_INIT VOICE_CALL_PANEL_ON_RECEIVE_INVITE VOICE_CALL_PANEL_ON_RECEIVE_REMOVE_INVITE VOICE_CALL_PANEL_DESTORY PERFORMANCE_LOG_START PERFORMANCE_LOG_RENDER PROCESS_DOMAIN_TCP_ALIVE_CHANGE ENTER_POWER_SAVING_MODE_1 ENTER_POWER_SAVING_MODE_2 CLEAR_RENDER_FRAME_CACHE SEND_RENDER_WRITE_LOG EXIT_POWER_SAVING_MODE SCREEN_ON_METRICS_CHANGED BOOSTER_SET_CONFIG BOOSTER_TEST_SPEED BOOSTER_EVENTS BOOSTER_DEFAULT_INSTALL_PATH BOOSTER_GET_GAME_INFO BOOSTER_STOP_DOWNLOAD BOOSTER_CLEAN_CACHE REGEDIT_GET REGEDIT_SET REGEDIT_DELETE
+GLOBAL_GET_GLOBAL GLOBAL_ON_ROUTER_JUMP STORE_AUTH_BACKFILL_COOKIE STORE_IS_AUTH_COOKIE_MISSING LOGGER_OPEN_DIR LOGGER_GET_ZIP_FILE LOGGER_UPDATE_COMMON_PARAMS PROCESS_TCP_ALIVE_DATA CHECK_FULLSCREEN_START CHECK_FULLSCREEN_STOP CHECK_FULLSCREEN_CHANGE SYSTEM_ON_SECOND_INSTANCE GLOBAL_SHORTCUT_CALLBACK VOLUME_SET_MIC_AGC_ALL VOLUME_REFRESH_CHILDREN_PROCESS VOLUME_REFRESH_DEVICE_LIST WINDOW_SET_ALWAY_ON_TOP COMMON_WIN_RESET_POSITION COMMON_WIN_ON_CLOSED AUDIO_AI_PIPE AUDIO_AI_ENABLE_AGC AUDIO_AI_ENABLE_DENOISE AUDIO_AI_GET_PROCESS_CPU_USAGE_BY_NAME AUDIO_AI_ENABLE_RECORD DOWNLOAD_GET_LIST DOWNLOAD_DOWNLAOD DOWNLOAD_CANCEL DOWNLOAD_ERROR DOWNLOAD_OPEN_PATH PC_INACTIVE_START PC_INACTIVE_STOP PC_INACTIVE_CHANGE SCREENSHOT_START SCREENSHOT_ON_CONFIRM SCREENSHOT_ON_SAVE VOICE_CALL_PANEL_INIT VOICE_CALL_PANEL_ON_RECEIVE_INVITE VOICE_CALL_PANEL_ON_RECEIVE_REMOVE_INVITE VOICE_CALL_PANEL_DESTORY PERFORMANCE_LOG_START PERFORMANCE_LOG_RENDER PROCESS_DOMAIN_TCP_ALIVE_CHANGE ENTER_POWER_SAVING_MODE_1 ENTER_POWER_SAVING_MODE_2 CLEAR_RENDER_FRAME_CACHE SEND_RENDER_WRITE_LOG EXIT_POWER_SAVING_MODE SCREEN_ON_METRICS_CHANGED BOOSTER_SET_CONFIG BOOSTER_TEST_SPEED BOOSTER_EVENTS BOOSTER_DEFAULT_INSTALL_PATH BOOSTER_GET_GAME_INFO BOOSTER_STOP_DOWNLOAD BOOSTER_CLEAN_CACHE REGEDIT_GET REGEDIT_SET REGEDIT_DELETE
 ```
 
 ## 6. E · 尚未验证（横切视图）
@@ -383,14 +385,14 @@ node scripts/check-upstream.mjs --app <dir> --write-baseline
 | 50 | `SYSTEM_OPEN_PATH` | A |
 | 51 | `SYSTEM_GET_UNIQUE` | A |
 | 52 | `SYSTEM_GET_UNIQUE_DETAIL` | A |
-| 53 | `SYSTEM_GET_FILE` | D |
+| 53 | `SYSTEM_GET_FILE` | A |
 | 54 | `SYSTEM_OPEN_EXTERNAL` | A |
 | 55 | `SYSTEM_LOGOUT` | A |
 | 56 | `SYSTEM_GET_PATH` | A |
 | 57 | `SYSTEM_GET_DNS_SERVER` | A |
 | 58 | `SYSTEM_GET_ACTIVE_DOMAIN` | A |
 | 59 | `SYSTEM_WAIT_ACTIVE_DOMAIN` | A |
-| 60 | `SYSTEM_SWITCH_SERVER_API` | D |
+| 60 | `SYSTEM_SWITCH_SERVER_API` | A |
 | 61 | `SYSTEM_CHECK_ADMIN` | C |
 | 62 | `SYSTEM_SET_AUTH_COOKIE` | A |
 | 63 | `SYSTEM_CHECK_ACCESS_FILE` | A |
