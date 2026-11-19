@@ -9,10 +9,10 @@
 
 | 类别 | 数量 | 含义 |
 |---|---:|---|
-| **A 已完整实现** | 91 | 走 Electron 跨平台 API 或真实系统调用，语义与 Windows 版等价 |
+| **A 已完整实现** | 92 | 走 Electron 跨平台 API 或真实系统调用，语义与 Windows 版等价 |
 | **B Linux 替代实现** | 33 | 用 `/proc`、`pactl`、`globalShortcut`、`desktopCapturer`、独立窗口等替代 Windows 专有机制 |
-| **C 明确不支持** | 27 | 返回显式的「不支持」语义，前端能识别，不会假装成功 |
-| **D 临时兼容桩** | 58 | 返回常量占位，界面不报错但功能不生效（**风险集中区**） |
+| **C 明确不支持** | 28 | 返回显式的「不支持」语义，前端能识别，不会假装成功 |
+| **D 临时兼容桩** | 56 | 返回常量占位，界面不报错但功能不生效（**风险集中区**） |
 | 合计 | **209** | 与官方 `constants.js` 的 `IPCEventName` 一一对应 |
 
 四条需要先知道的结论：
@@ -31,7 +31,7 @@
 - **D 临时兼容桩**：为了让界面继续渲染而返回常量。**默认安全但语义空洞**，任何依赖其结果的新功能都会静默失效。
 - **E 尚未验证**（横切视图，见第 6 节）：实现存在，但只在部分环境（X11/Wayland、有无密钥环、有无 PipeWire）验证过，**不是独立主类**，避免一条通道被重复计入两个桶。
 
-## 2. A 类 · 已完整实现（91 条）
+## 2. A 类 · 已完整实现（92 条）
 
 | 通道 | 实现位置 | 行为/返回 | 备注 |
 |---|---|---|---|
@@ -93,6 +93,7 @@
 | `COMMON_WIN_OPEN` | `patches/handlers.js` | 见备注 | 真实子窗口（BrowserWindow），由 id 管理生命周期 |
 | `COMMON_WIN_CLOSE` | `patches/handlers.js` | 见备注 |  |
 | `LOGGER_APP_LOG` | `patches/handlers.js` | 见备注 | 渲染侧日志落文件 |
+| `LOGGER_OPEN_DIR` | `patches/handlers.js` | 见备注 | 真实打开日志目录：app.getPath(logs) → userData/logs → userData，失败返回 false |
 | `WINDOW_CUT` | `patches/main.js` | 见备注 |  |
 | `WINDOW_COPY` | `patches/main.js` | 见备注 |  |
 | `WINDOW_PASTE` | `patches/main.js` | 见备注 |  |
@@ -165,7 +166,7 @@
 | `ON_OVERLAY_WINDOW_MOUSE_ENTER` | `patches/main.js` installOverlay() | 无返回 / `true` |  |
 | `ON_OVERLAY_WINDOW_MOUSE_LEAVE` | `patches/main.js` installOverlay() | 无返回 / `true` |  |
 
-## 4. C 类 · 明确不支持（27 条）
+## 4. C 类 · 明确不支持（28 条）
 
 | 通道 | 实现位置 | 行为/返回 | 备注 |
 |---|---|---|---|
@@ -196,8 +197,9 @@
 | `SYSTEM_GET_DXDIAGINFO` | `patches/handlers.js` | 见备注 | 返回固定假 DXDIAG（服务端仅做环境展示） |
 | `SYSTEM_GET_BLUETOOTH_DEVICE` | `patches/handlers.js` | 见备注 |  |
 | `SYSTEM_CHECK_ADMIN` | `patches/handlers.js` | `false` | 恒 false（Linux 无管理员令牌概念） |
+| `AUDIO_AI_PIPE` | `patches/handlers.js` | 见备注 | 明确不支持：{code:-1,message:"Linux 移植版未提供音频 AI 处理"}，原实现是 {code:0} 伪成功 |
 
-## 5. D 类 · 临时兼容桩（58 条）
+## 5. D 类 · 临时兼容桩（56 条）
 
 以下通道返回常量，界面正常但功能不生效。**按前缀聚类**，同一簇行为一致：
 
@@ -214,7 +216,7 @@
 | `REGEDIT_GET` `REGEDIT_SET` `REGEDIT_DELETE` | `null` | 注册表语义由 STORE/SETTING 替代，等价可用 |
 | `BOOSTER_SET_CONFIG` `BOOSTER_TEST_SPEED` `BOOSTER_EVENTS` `BOOSTER_GET_GAME_INFO` `BOOSTER_STOP_DOWNLOAD` `BOOSTER_DEFAULT_INSTALL_PATH` `BOOSTER_CLEAN_CACHE` | 常量 | 加速器周边接口（主能力已在 C 类明确拒绝） |
 | `STORE_AUTH_BACKFILL_COOKIE` `STORE_IS_AUTH_COOKIE_MISSING` | `null` / `false` | 登录态回填逻辑未实现（当前不影响登录） |
-| `LOGGER_OPEN_DIR` `LOGGER_GET_ZIP_FILE` `LOGGER_UPDATE_COMMON_PARAMS` | 空 / `null` | 「打开日志目录」「打包日志」按钮无效 |
+| `LOGGER_GET_ZIP_FILE` `LOGGER_UPDATE_COMMON_PARAMS` | `null` / 空 | 「打包日志」未实现（`LOGGER_OPEN_DIR` 已实现真实打开目录，移入 A 类） |
 | `GLOBAL_ON_ROUTER_JUMP` `GLOBAL_SHORTCUT_CALLBACK` `VOICEHOOK_CALLBACK` `VOICEHOOK_UNHOOK` `SYSTEM_ON_SECOND_INSTANCE` | 空 | 事件型通道，空实现可接受 |
 | `VOLUME_SET_MIC_AGC_ALL` `VOLUME_REFRESH_DEVICE_LIST` `VOLUME_REFRESH_CHILDREN_PROCESS` | 空 | 设备热插拔与 AGC 批量设置未接 |
 | `SCREENSHOT_START` `SCREENSHOT_ON_CONFIRM` `SCREENSHOT_ON_SAVE` | `true` / 空 | 截图确认链未完成（`SCREENSHOT_FULL` 抓屏本身可用） |
@@ -222,10 +224,10 @@
 | `WINDOW_SET_ALWAY_ON_TOP` | catch-all `{}` | 官方错拼死通道，preload 无调用方，保留现状即可 |
 | `SYSTEM_GET_FILE` `SYSTEM_SWITCH_SERVER_API` `__GGPLAY_CALL` | `{code:0,data:null}` / `true` / `null` | 伪成功：取文件、切域名实际未发生 |
 
-D 类完整名单（58 条，供 grep 对账）：
+D 类完整名单（56 条，供 grep 对账）：
 
 ```
-GLOBAL_GET_GLOBAL GLOBAL_ON_ROUTER_JUMP STORE_AUTH_BACKFILL_COOKIE STORE_IS_AUTH_COOKIE_MISSING LOGGER_OPEN_DIR LOGGER_GET_ZIP_FILE LOGGER_UPDATE_COMMON_PARAMS PROCESS_TCP_ALIVE_DATA CHECK_FULLSCREEN_START CHECK_FULLSCREEN_STOP CHECK_FULLSCREEN_CHANGE SYSTEM_ON_SECOND_INSTANCE GLOBAL_SHORTCUT_CALLBACK VOLUME_SET_MIC_AGC_ALL VOLUME_REFRESH_CHILDREN_PROCESS VOLUME_REFRESH_DEVICE_LIST WINDOW_SET_ALWAY_ON_TOP COMMON_WIN_RESET_POSITION COMMON_WIN_ON_CLOSED AUDIO_AI_PIPE AUDIO_AI_ENABLE_AGC AUDIO_AI_ENABLE_DENOISE AUDIO_AI_GET_PROCESS_CPU_USAGE_BY_NAME AUDIO_AI_ENABLE_RECORD DOWNLOAD_GET_LIST DOWNLOAD_DOWNLAOD DOWNLOAD_CANCEL DOWNLOAD_ERROR DOWNLOAD_OPEN_PATH PC_INACTIVE_START PC_INACTIVE_STOP PC_INACTIVE_CHANGE SCREENSHOT_START SCREENSHOT_ON_CONFIRM SCREENSHOT_ON_SAVE VOICE_CALL_PANEL_INIT VOICE_CALL_PANEL_ON_RECEIVE_INVITE VOICE_CALL_PANEL_ON_RECEIVE_REMOVE_INVITE VOICE_CALL_PANEL_DESTORY PERFORMANCE_LOG_START PERFORMANCE_LOG_RENDER PROCESS_DOMAIN_TCP_ALIVE_CHANGE ENTER_POWER_SAVING_MODE_1 ENTER_POWER_SAVING_MODE_2 CLEAR_RENDER_FRAME_CACHE SEND_RENDER_WRITE_LOG EXIT_POWER_SAVING_MODE SCREEN_ON_METRICS_CHANGED BOOSTER_SET_CONFIG BOOSTER_TEST_SPEED BOOSTER_EVENTS BOOSTER_DEFAULT_INSTALL_PATH BOOSTER_GET_GAME_INFO BOOSTER_STOP_DOWNLOAD BOOSTER_CLEAN_CACHE REGEDIT_GET REGEDIT_SET REGEDIT_DELETE
+GLOBAL_GET_GLOBAL GLOBAL_ON_ROUTER_JUMP STORE_AUTH_BACKFILL_COOKIE STORE_IS_AUTH_COOKIE_MISSING LOGGER_GET_ZIP_FILE LOGGER_UPDATE_COMMON_PARAMS PROCESS_TCP_ALIVE_DATA CHECK_FULLSCREEN_START CHECK_FULLSCREEN_STOP CHECK_FULLSCREEN_CHANGE SYSTEM_ON_SECOND_INSTANCE GLOBAL_SHORTCUT_CALLBACK VOLUME_SET_MIC_AGC_ALL VOLUME_REFRESH_CHILDREN_PROCESS VOLUME_REFRESH_DEVICE_LIST WINDOW_SET_ALWAY_ON_TOP COMMON_WIN_RESET_POSITION COMMON_WIN_ON_CLOSED AUDIO_AI_ENABLE_AGC AUDIO_AI_ENABLE_DENOISE AUDIO_AI_GET_PROCESS_CPU_USAGE_BY_NAME AUDIO_AI_ENABLE_RECORD DOWNLOAD_GET_LIST DOWNLOAD_DOWNLAOD DOWNLOAD_CANCEL DOWNLOAD_ERROR DOWNLOAD_OPEN_PATH PC_INACTIVE_START PC_INACTIVE_STOP PC_INACTIVE_CHANGE SCREENSHOT_START SCREENSHOT_ON_CONFIRM SCREENSHOT_ON_SAVE VOICE_CALL_PANEL_INIT VOICE_CALL_PANEL_ON_RECEIVE_INVITE VOICE_CALL_PANEL_ON_RECEIVE_REMOVE_INVITE VOICE_CALL_PANEL_DESTORY PERFORMANCE_LOG_START PERFORMANCE_LOG_RENDER PROCESS_DOMAIN_TCP_ALIVE_CHANGE ENTER_POWER_SAVING_MODE_1 ENTER_POWER_SAVING_MODE_2 CLEAR_RENDER_FRAME_CACHE SEND_RENDER_WRITE_LOG EXIT_POWER_SAVING_MODE SCREEN_ON_METRICS_CHANGED BOOSTER_SET_CONFIG BOOSTER_TEST_SPEED BOOSTER_EVENTS BOOSTER_DEFAULT_INSTALL_PATH BOOSTER_GET_GAME_INFO BOOSTER_STOP_DOWNLOAD BOOSTER_CLEAN_CACHE REGEDIT_GET REGEDIT_SET REGEDIT_DELETE
 ```
 
 ## 6. E · 尚未验证（横切视图）
@@ -319,6 +321,16 @@ WINDOW_IS_MIN WINDOW_IS_VISIBLE
 - 默认值保证老用户指纹零漂移，这也是它默认关闭的原因。
 - **真机验证（0.0.12 → 开发版，真实账号）**：开启灰度后 `device_id=d8da83cc-47e6-469d-aaa1-ad9b7cd14d94`、`bios=21d1589c…`、`machine=7953cf63…`，页面文本 5718 / 节点 2977，`api/v3/user/settings`、`guild/index`、`feature-gray/match` 全部 200，**无 401/403、无风控页、无需重登**。
 - 验证结束后已把指纹**恢复原状**：关闭灰度时 `GET_UNIQUE` 回到 `0c68b3cf…`（与 0.0.12 安装版一致），避免两个版本来回切换时反复变更指纹。
+
+### 9.3 注册唯一性（实现归属）
+
+同一通道**只能有一处权威实现**。本轮差点踩到的坑：`SYSTEM_GET_HARDWARE_ACCELERATION` / `SYSTEM_SET_HARDWARE_ACCELERATION` 的权威实现在 `patches/main.js` 的 `installDesktopIntegration()`（有真实 `globalPref` 读写与 `needRestart` 语义），而 `patches/handlers.js` 里还留着一对同名空实现（`true` / `{}`）。靠 `installStubs()` 之后的 `removeHandler` + `handle` 覆盖来保证「后者胜」，**一旦注册顺序变动，空实现就会反盖真实实现**——表现正是「开关点了没反应」。
+
+现在两条空实现已删除，并加了断言把「handlers 不得注册硬件加速通道」钉成不变量。通用规则：
+
+1. 权威实现只写一处，其余位置若需要同名通道，必须显式注释说明「此处不注册，见 X」；
+2. 依赖覆盖的通道要在本表标注归属文件，避免下次重构时被搬动；
+3. 回归测试里对「权威实现存在且返回非空语义」断言，而不是只断言通道存在。
 
 ## 10. 上游兼容性检测（P2-7）
 
@@ -429,7 +441,7 @@ node scripts/check-upstream.mjs --app <dir> --write-baseline
 | 19 | `STORE_SESSION_FLUSH` | A |
 | 20 | `STORE_AUTH_BACKFILL_COOKIE` | D |
 | 21 | `STORE_IS_AUTH_COOKIE_MISSING` | D |
-| 22 | `LOGGER_OPEN_DIR` | D |
+| 22 | `LOGGER_OPEN_DIR` | A |
 | 23 | `LOGGER_GET_ZIP_FILE` | D |
 | 24 | `LOGGER_APP_LOG` | A |
 | 25 | `LOGGER_UPDATE_COMMON_PARAMS` | D |
@@ -522,7 +534,7 @@ node scripts/check-upstream.mjs --app <dir> --write-baseline
 | 112 | `COMMON_WIN_CLOSE` | A |
 | 113 | `COMMON_WIN_RESET_POSITION` | D |
 | 114 | `COMMON_WIN_ON_CLOSED` | D |
-| 115 | `AUDIO_AI_PIPE` | D |
+| 115 | `AUDIO_AI_PIPE` | C |
 | 116 | `AUDIO_AI_ENABLE_AGC` | D |
 | 117 | `AUDIO_AI_ENABLE_DENOISE` | D |
 | 118 | `AUDIO_AI_GET_PROCESS_CPU_USAGE_BY_NAME` | D |
