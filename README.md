@@ -352,15 +352,16 @@ bash tests/run-tests.sh
 ELECTRON=/path/to/electron bash tests/run-tests.sh
 ```
 
-三组共 40+ 断言，全部在真实运行时上跑，不是 mock：
+四组共 87 条断言，全部在真实运行时上跑，不是 mock：
 
 | 组 | 覆盖 | 运行环境 |
 |---|---|---|
-| 窗口尺寸 | `WINDOW_SET_SIZE_ORIGIN` 参数校验、浮点取整、窗口销毁、异常吞并 | 纯 Node |
-| IPC 默认态 | `SYSTEM_GET_FILE` 无窗口返回 `-1`、域名切换白名单/别名/落盘/复原、`GET_ACTIVE_DOMAIN` 形状、设备指纹零漂移 | 真实 Electron |
-| IPC 灰度态 | `KOOK_DEVICE_DETAIL_FULL=1` 下 `{bios, machine, device_id}`、`device_id` 与 `GET_UNIQUE` 同源、跨进程重启值不变 | 真实 Electron（同一 userData 跑两轮） |
+| 窗口尺寸（6） | `WINDOW_SET_SIZE_ORIGIN` 参数校验、浮点取整、窗口销毁、异常吞并 | 纯 Node |
+| IPC 默认态（17） | `SYSTEM_GET_FILE` 无窗口返回 `-1`、域名切换白名单/别名/落盘/复原、`GET_ACTIVE_DOMAIN` 形状、设备指纹零漂移 | 真实 Electron |
+| IPC 灰度态（37） | `KOOK_DEVICE_DETAIL_FULL=1` 下 `{bios, machine, device_id}`、`device_id` 与 `GET_UNIQUE` 同源、跨进程重启值不变 | 真实 Electron（同一 userData 跑两轮） |
+| 凭据存储（27） | 四态后端判定、`v2:` GCM 往返与**篡改一字节解不出来**、`none` 拒绝落盘、`insecure` 的 `v0:` 确实是 Base64、旧格式迁移重加密 | 真实 Electron（隔离 userData） |
 
-默认态那一组锁的是「不许悄悄改变老用户指纹」，灰度态那一组锁的是「改的时候必须三条通道一起改」。
+默认态那一组锁的是「不许悄悄改变老用户指纹」，灰度态锁的是「改的时候必须三条通道一起改」，凭据那组锁的是「声称加密就真的加密、声称拒绝就真的不落盘」。
 
 209 个 IPC 通道的实现状态分类见 [docs/IPC-CONTRACT.md](docs/IPC-CONTRACT.md)；Electron 安全配置的实测结论见 [docs/SECURITY.md](docs/SECURITY.md)。
 
