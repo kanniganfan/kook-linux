@@ -2,6 +2,13 @@
 // 目标：用原版 webapp + 原版 preload，按 209 个 IPC 契约重建主进程。
 const { app, BrowserWindow, ipcMain, session, protocol } = require('electron')
 
+// path / fs / os 必须在 globalPref() 之前就到位：桌面设置（硬件加速、关闭到托盘、
+// 效能模式）要在 app ready 之前读盘决定，而 globalPref 里的 try/catch 会把
+// ReferenceError 静默吞掉，表现就是设置页里关掉硬件加速完全不生效。
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+
 // 应用名固定为 KOOK（不加任何后缀）：GNOME 任务栏按它和 kook-linux.desktop 的
 // StartupWMClass 对上，名字或 WM_CLASS 一变就会退回 Electron 的默认齿轮图标。
 try {
@@ -52,9 +59,6 @@ try {
 } catch (e) {
   console.log('[linux-main] 硬件加速设置读取失败', e && e.message)
 }
-const path = require('path')
-const fs = require('fs')
-const os = require('os')
 const { createDeviceIdentity } = require('./device-identity')
 
 const APP_DIR = __dirname
@@ -2267,16 +2271,35 @@ function installNotifications() {
   // 页面里的 new Notification() 需要显式放行，不同发行版的权限默认值不一致
   try {
     const ses = session.defaultSession
-    ses.setPermissionRequestHandler((wc, permission, callback) => {
-      if (permission === 'notifications' || permission === 'media' || permission === 'display-capture' ||
-          permission === 'clipboard-read' || permission === 'clipboard-sanitized-write' ||
-          permission === 'fullscreen' || permission === 'background-sync') {
-        return callback(true)
+    // 权限不能无条件放行：只认官方域名与本机资源服务发起的请求。
+    // 官方 webapp 从 https://www.kookapp.cn/app/* 加载，静态资源由本地同源拦截
+    // 或 127.0.0.1 上的本地服务提供，正常场景不会落在白名单之外。
+    // 加这层是因为一旦 webapp 里出现 XSS 或被注入的内容，无来源校验的
+    // media / display-capture / clipboard-read 会被直接拿去用。
+    const ORIGIN_OK = (u) => {
+      const url = String(u || '')
+      return (
+        /^https:\/\/([a-z0-9-]+\.)*kookapp\.cn([/?#]|$)/i.test(url) ||
+        /^http:\/\/127\.0\.0\.1(:\d+)?([/?#]|$)/i.test(url) ||
+        /^http:\/\/localhost(:\d+)?([/?#]|$)/i.test(url) ||
+        /^(file|devtools):/i.test(url)
+      )
+    }
+    const PERMISSIONS = ['notifications', 'media', 'display-capture', 'clipboard-read',
+      'clipboard-sanitized-write', 'fullscreen']
+    ses.setPermissionRequestHandler((wc, permission, callback, details) => {
+      const src = (details && details.requestingUrl) || (wc && wc.getURL && wc.getURL()) || ''
+      if (!ORIGIN_OK(src)) {
+        LOG('[perm] 拒绝来源不明的权限请求', permission, String(src).slice(0, 80))
+        return callback(false)
       }
+      if (permission === 'background-sync' || PERMISSIONS.includes(permission)) return callback(true)
       return callback(false)
     })
-    ses.setPermissionCheckHandler((wc, permission) => {
-      return ['notifications', 'media', 'display-capture', 'clipboard-read', 'clipboard-sanitized-write', 'fullscreen'].includes(permission)
+    ses.setPermissionCheckHandler((wc, permission, requestingOrigin, details) => {
+      const src = requestingOrigin || (details && details.requestingUrl) || (wc && wc.getURL && wc.getURL()) || ''
+      if (!ORIGIN_OK(src)) return false
+      return PERMISSIONS.includes(permission)
     })
   } catch (e) { LOG('[notify] 权限策略设置失败', e && e.message) }
 
@@ -2449,9 +2472,17 @@ function createWindow() {
     webPreferences: {
       preload: path.join(APP_DIR, 'preload-shim.js'),
       nodeIntegration: false,
+      // contextIsolation 必须保持 false：官方 preload 是原版文件，它在 preload 里
+      // 直接 require('electron') 并往 window 上挂对象，开启隔离后实测页面直接白屏
+      // （body 文本长度 0，DOM 只到 61 个节点）。
       contextIsolation: false,
+      // sandbox 必须保持 false：preload 需要 node 能力（fs/path/child_process），
+      // 而且启动参数里带 --no-sandbox（AppImage 的 chrome-sandbox 没有 SUID 位，
+      // 挂载是只读 squashfs，设不上去）。
       sandbox: false,
-      webSecurity: false,
+      // webSecurity 已开启（原先关闭）。实测开启后页面加载完整（文本 5721 字符、
+      // 2989 个节点），本地资源服务与同源拦截都不受影响。
+      webSecurity: true,
       spellcheck: false,
     },
   })
