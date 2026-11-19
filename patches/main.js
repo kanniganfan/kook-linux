@@ -2656,6 +2656,16 @@ app.whenReady().then(async () => {
   installWindowsSpoof()
   installProtocolHandler()
   runtime = createRuntime({ app, LOG })
+  // 登录凭据的存储方式要能一眼看到：没装密钥环的机器上会退到「不保存」，
+  // 用户下次启动发现要重登时，日志里得有据可查。
+  try {
+    const ss = runtime.secretStatus && runtime.secretStatus()
+    if (ss) {
+      LOG('[secret] 凭据存储 mode=' + ss.mode + ' backend=' + (ss.backend || '-') +
+          ' secure=' + ss.secure + (ss.needsMigration ? ' 需要迁移旧明文' : ''))
+      if (!ss.secure) LOG('[secret] 当前无法安全保存登录状态，将不会落盘；装 gnome-keyring 或 kwallet 后恢复')
+    }
+  } catch (e) { LOG('[secret] 状态读取失败', e && e.message) }
   try { installOverlay() } catch (e) { LOG('屏幕覆盖挂载失败', e && e.message) }
   try { installNotifications() } catch (e) { LOG('通知适配挂载失败', e && e.message) }
   LOG('真实通道已挂载 ->', Object.keys(runtime.handlers).length, '个')

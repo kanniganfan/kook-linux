@@ -7,30 +7,267 @@ const crypto = require('crypto')
 
 function createRuntime({ app, LOG }) {
   const { safeStorage, screen, desktopCapturer, session } = require('electron')
-  // 登录 token 走这里加密后再存 'ka'：必须返回字符串，不能返回对象
-  const encrypt = (plain) => {
-    const str = String(plain == null ? '' : plain)
+  const { execFileSync } = require('child_process')
+
+  // ───────────────────────── 凭据存储（SAFE_STORAGE_*）─────────────────────────
+  // 这里存的是登录 token（store important 'ka'），等价于账号凭据，按密文对待。
+  // 取数优先级：
+  //   1. Electron safeStorage 且后端是真后端（gnome_libsecret / kwallet*）
+  //   2. libsecret Secret Service（secret-tool）自管主密钥 + AES-256-GCM
+  //   3. 两者都没有 → 明确告警；不再静默 Base64 落盘
+  // 说明：Electron 在 Linux 上的 basic_text 后端用的是 Chromium 内置硬编码口令，
+  // isEncryptionAvailable() 仍返回 true，但等同于明文，必须单独识别并排除。
+  const SECRET_SERVICE = 'kook-linux'
+  const SECRET_ACCOUNT = 'store-key'
+  const GCM_PREFIX = 'v2:'
+  const PLAIN_PREFIX = 'v0:'
+  const WARN_MARK = path.join(app.getPath('userData'), 'linux-store', '.cred-warning-shown')
+
+  let secretState = null // {mode:'safeStorage'|'keyring'|'insecure'|'none', backend, secure}
+  let masterKey = null
+  let warned = false
+
+  function probeSafeStorage() {
+    let available = false
+    let backend = 'unknown'
     try {
-      if (safeStorage && safeStorage.isEncryptionAvailable()) {
-        return safeStorage.encryptString(str).toString('base64')
+      available = !!(safeStorage && safeStorage.isEncryptionAvailable())
+    } catch (e) {
+      LOG('[cred] safeStorage.isEncryptionAvailable 异常:', e && e.message)
+    }
+    try {
+      if (safeStorage && typeof safeStorage.getSelectedStorageBackend === 'function') {
+        backend = safeStorage.getSelectedStorageBackend()
       }
     } catch (e) {
-      LOG('safeStorage 加密不可用:', e && e.message)
+      LOG('[cred] getSelectedStorageBackend 异常:', e && e.message)
     }
-    return Buffer.from(str, 'utf8').toString('base64')
+    // basic_text 不是加密：Chromium 用固定口令派生密钥，任何本机进程都能解
+    const secure = available && backend !== 'basic_text'
+    return { available, backend, secure }
   }
-  const decrypt = (b64) => {
+
+  function keyringLookup() {
     try {
-      const buf = Buffer.from(String(b64 || ''), 'base64')
-      if (safeStorage && safeStorage.isEncryptionAvailable()) {
-        try {
-          return safeStorage.decryptString(buf)
-        } catch {}
-      }
-      return buf.toString('utf8')
+      const out = execFileSync(
+        'secret-tool',
+        ['lookup', 'service', SECRET_SERVICE, 'account', SECRET_ACCOUNT],
+        { timeout: 3000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim()
+      return out || ''
     } catch {
       return ''
     }
+  }
+
+  function keyringStore(hexKey) {
+    try {
+      execFileSync(
+        'secret-tool',
+        [
+          'store',
+          `--label=KOOK Linux 凭据密钥`,
+          'service', SECRET_SERVICE,
+          'account', SECRET_ACCOUNT,
+        ],
+        { timeout: 3000, encoding: 'utf8', input: hexKey, stdio: ['pipe', 'ignore', 'ignore'] }
+      )
+      return true
+    } catch (e) {
+      LOG('[cred] 写入系统密钥环失败:', e && e.message)
+      return false
+    }
+  }
+
+  // 取（或首次生成）AES-256 主密钥，只放系统密钥环，不落磁盘
+  function loadMasterKey() {
+    if (masterKey) return masterKey
+    let hex = keyringLookup()
+    if (!/^[0-9a-f]{64}$/i.test(hex)) {
+      hex = crypto.randomBytes(32).toString('hex')
+      if (!keyringStore(hex)) return null
+      // 回读校验：密钥环服务不可用时 secret-tool 可能"成功"但读不回来
+      const back = keyringLookup()
+      if (!/^[0-9a-f]{64}$/i.test(back) || back !== hex) {
+        LOG('[cred] 密钥环回读校验失败，放弃自管密钥')
+        return null
+      }
+    }
+    masterKey = Buffer.from(hex, 'hex')
+    return masterKey
+  }
+
+  function resolveSecretState() {
+    if (secretState) return secretState
+    const probe = probeSafeStorage()
+    if (probe.secure) {
+      secretState = { mode: 'safeStorage', backend: probe.backend, available: true, secure: true }
+    } else if (loadMasterKey()) {
+      secretState = { mode: 'keyring', backend: 'libsecret', available: true, secure: true }
+    } else {
+      const allowInsecure = process.env.KOOK_INSECURE_STORE === '1'
+      secretState = {
+        mode: allowInsecure ? 'insecure' : 'none',
+        backend: probe.backend,
+        available: probe.available,
+        secure: false,
+      }
+      warnInsecure(secretState)
+    }
+    LOG(
+      '[cred] 凭据存储后端:',
+      secretState.mode,
+      'backend=' + secretState.backend,
+      secretState.secure ? '（加密）' : '（未加密）'
+    )
+    return secretState
+  }
+
+  // 明确提示，而不是静默降级；每次安装只弹一次
+  function warnInsecure(state) {
+    if (warned) return
+    warned = true
+    const insecureWrites = state.mode === 'insecure'
+    const why = state.available === false
+      ? 'safeStorage 不可用（后端显示 ' + state.backend + '），且 secret-tool 也不可用。'
+      : 'safeStorage 后端 ' + state.backend + ' 不提供真正的加密（basic_text），且 secret-tool 不可用。'
+    const msg = insecureWrites
+      ? why + '\n' +
+        '已按 KOOK_INSECURE_STORE=1 的显式设置以便捷方式保存登录凭据：文件内是 Base64，' +
+        '不是加密，任何能读你 home 的进程都能取到登录令牌。\n' +
+        '建议安装并启动 gnome-keyring 或 kwallet 后重启客户端，凭据会自动迁移为密文。'
+      : why + '\n' +
+        '为了避免把登录令牌以明文等价形式落盘，本次不会持久化登录状态：' +
+        '关闭客户端后需要重新登录。\n' +
+        '安装并启动 gnome-keyring 或 kwallet 即可恢复「记住登录」。\n' +
+        '如果你明确接受风险，可设置环境变量 KOOK_INSECURE_STORE=1 后再启动。'
+    LOG('[cred] 警告:', msg.replace(/\n/g, ' '))
+    try {
+      if (fs.existsSync(WARN_MARK)) return
+      fs.mkdirSync(path.dirname(WARN_MARK), { recursive: true })
+      fs.writeFileSync(WARN_MARK, new Date().toISOString() + '\n')
+    } catch {}
+    // 异步弹窗，绝不阻塞 sendSync；无头/自动化环境可用 KOOK_NO_DIALOG=1 关掉弹窗（仍写日志）
+    if (process.env.KOOK_NO_DIALOG === '1') return
+    try {
+      const { dialog } = require('electron')
+      app.whenReady().then(() => {
+        try {
+          dialog.showMessageBox({
+            type: 'warning',
+            title: 'KOOK: 登录凭据未加密保存',
+            message: insecureWrites ? '登录凭据将以未加密方式保存' : '本次不会保存登录状态',
+            detail: msg,
+            buttons: ['知道了'],
+            noLink: true,
+          })
+        } catch (e) {
+          LOG('[cred] 弹窗失败:', e && e.message)
+        }
+      })
+    } catch (e) {
+      LOG('[cred] 弹窗不可用:', e && e.message)
+    }
+  }
+
+  function gcmEncrypt(key, str) {
+    const iv = crypto.randomBytes(12)
+    const c = crypto.createCipheriv('aes-256-gcm', key, iv)
+    const ct = Buffer.concat([c.update(str, 'utf8'), c.final()])
+    return (
+      GCM_PREFIX +
+      [iv.toString('base64'), c.getAuthTag().toString('base64'), ct.toString('base64')].join(':')
+    )
+  }
+
+  function gcmDecrypt(key, payload) {
+    const [ivB64, tagB64, ctB64] = payload.slice(GCM_PREFIX.length).split(':')
+    if (!ivB64 || !tagB64 || !ctB64) return ''
+    const d = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivB64, 'base64'))
+    d.setAuthTag(Buffer.from(tagB64, 'base64'))
+    return Buffer.concat([d.update(Buffer.from(ctB64, 'base64')), d.final()]).toString('utf8')
+  }
+
+  // 识别历史格式：Electron 密文 base64 解出来以 v10/v11 开头；旧版降级则是裸 base64 明文
+  function looksLikeElectronCipher(buf) {
+    if (!buf || buf.length < 3) return false
+    const head = buf.subarray(0, 3).toString('latin1')
+    return head === 'v10' || head === 'v11'
+  }
+
+  let needsMigration = false
+
+  // 登录 token 走这里加密后再存 'ka'：必须返回字符串，不能返回对象
+  const encrypt = (plain) => {
+    const str = String(plain == null ? '' : plain)
+    const state = resolveSecretState()
+    if (state.mode === 'safeStorage') {
+      try {
+        return safeStorage.encryptString(str).toString('base64')
+      } catch (e) {
+        LOG('[cred] safeStorage 加密失败，尝试密钥环:', e && e.message)
+      }
+    }
+    if (state.mode === 'safeStorage' || state.mode === 'keyring') {
+      const key = loadMasterKey()
+      if (key) {
+        try {
+          return gcmEncrypt(key, str)
+        } catch (e) {
+          LOG('[cred] AES-GCM 加密失败:', e && e.message)
+        }
+      }
+    }
+    if (state.mode === 'insecure') {
+      return PLAIN_PREFIX + Buffer.from(str, 'utf8').toString('base64')
+    }
+    // 无安全后端且未显式接受风险：拒绝落盘，让上层拿不到可存的密文
+    LOG('[cred] 无可用安全存储，拒绝保存凭据（返回空串）')
+    return ''
+  }
+
+  const decrypt = (b64) => {
+    const s = String(b64 == null ? '' : b64)
+    if (!s) return ''
+    try {
+      if (s.startsWith(GCM_PREFIX)) {
+        const key = loadMasterKey()
+        if (!key) return ''
+        try {
+          return gcmDecrypt(key, s)
+        } catch (e) {
+          LOG('[cred] 密文解密失败（密钥环可能已重置）:', e && e.message)
+          return ''
+        }
+      }
+      if (s.startsWith(PLAIN_PREFIX)) return Buffer.from(s.slice(PLAIN_PREFIX.length), 'base64').toString('utf8')
+
+      const buf = Buffer.from(s, 'base64')
+      // 历史格式 1：Electron safeStorage 密文（当前机器若换了密钥环会解不开）
+      if (looksLikeElectronCipher(buf)) {
+        try {
+          return safeStorage.decryptString(buf)
+        } catch (e) {
+          LOG('[cred] 历史 safeStorage 密文无法解密:', e && e.message)
+          return ''
+        }
+      }
+      // 历史格式 2：旧版静默降级的 Base64 明文，读出来但标记需要迁移
+      const legacy = buf.toString('utf8')
+      if (legacy) {
+        LOG('[cred] 读到历史未加密凭据，将在下次写入时升级为密文')
+        needsMigration = true
+      }
+      return legacy
+    } catch (e) {
+      LOG('[cred] decrypt 异常:', e && e.message)
+      return ''
+    }
+  }
+
+  const secretStatus = () => {
+    const st = resolveSecretState()
+    return { mode: st.mode, backend: st.backend, secure: st.secure, needsMigration }
   }
 
   const dir = path.join(app.getPath('userData'), 'linux-store')
@@ -76,6 +313,27 @@ function createRuntime({ app, LOG }) {
     }
     dirty.clear()
   }
+
+  // 历史数据迁移：旧版把登录凭据按「裸 Base64」写过盘（等同明文）。
+  // 只要当前有安全后端，就在这里升级为密文；没有安全后端则保持原样并告警。
+  function migrateCredentials() {
+    const cur = data.important && data.important.ka
+    if (!cur || typeof cur !== 'string') return
+    if (cur.startsWith(GCM_PREFIX) || cur.startsWith(PLAIN_PREFIX)) return
+    const buf = Buffer.from(cur, 'base64')
+    if (looksLikeElectronCipher(buf)) return
+    const plain = buf.toString('utf8')
+    if (!plain) return
+    const re = encrypt(plain)
+    if (!re) {
+      LOG('[cred] 检测到历史未加密登录凭据，但当前无安全存储可用，未做迁移')
+      return
+    }
+    data.important.ka = re
+    markDirty('important')
+    LOG('[cred] 历史未加密登录凭据已迁移为密文:', re.slice(0, 3))
+  }
+  migrateCredentials()
 
   // 稳定机器标识（首次生成后复用）
   const idFile = path.join(dir, 'machine-id')
@@ -407,7 +665,7 @@ function createRuntime({ app, LOG }) {
 
   // ── 系统能力（Linux 真实现）──
   const { shell, dialog, clipboard, nativeImage } = require('electron')
-  const { execFileSync } = require('child_process')
+  // execFileSync 已在文件顶部（凭据存储段）引入，这里复用
   const runCmd = (cmd, args) => {
     try {
       return execFileSync(cmd, args, { timeout: 2500, encoding: 'utf8' }).trim()
@@ -913,7 +1171,8 @@ function createRuntime({ app, LOG }) {
     try { installVkBridge() } catch (e) { LOG('[iohook] 本地键盘桥初始化失败', e && e.message) }
   }, 3000)
 
-  return { handlers, flush, dir }
+  // secretStatus 供主进程/自检日志读取（不是 IPC 通道，不进契约表）
+  return { handlers, flush, dir, secretStatus }
 }
 
 module.exports = { createRuntime }

@@ -104,6 +104,7 @@ Linux 客户端，也没有公开的 Linux 发布计划**。Linux 用户只能�
 | URL scheme | ✅ | 注册 `x-scheme-handler/kook`，网页唤起客户端 |
 | 多语言界面 | ✅ | 简体中文 / 繁体中文 / 日文 / 英文 |
 | 默认菜单栏移除 | ✅ | Linux 上那条 File/Edit/View 不出现 |
+| 凭据安全存储 | ✅ | `safeStorage` 真后端 → `secret-tool` + AES-256-GCM → 拒绝落盘，三层递降 |
 | 自动更新 | ❌ | **主动屏蔽**——官方更新器会装 Windows 安装包，覆盖掉移植版 |
 
 ---
@@ -342,6 +343,11 @@ docs/                 构建与实现说明
 - **原生语音 SDK**：官方只提供 Windows 二进制，语音走官方 web/RTC 分支。
 - **迅游加速器**：官方合作方没有 Linux 版，工具箱里保留了入口但加了提示，不推荐下载。
 - **自动更新**：主动禁用，见上文。
+- **登录状态依赖系统密钥环**：凭据优先走 `safeStorage`（真后端，如 `gnome_libsecret` / `kwallet`），
+  其次是 `secret-tool` + AES-256-GCM。两者都没有时**不会落盘**，表现为每次启动要重新登录。
+  装 `gnome-keyring`（GNOME）或 `kwallet`（KDE）即可恢复；确实想在不安全环境下保存，
+  可设 `KOOK_INSECURE_STORE=1`，凭据会以带 `v0:` 标记的明文保存并弹窗警告。
+  启动日志里会打印当前用的是哪一层：`[secret] 凭据存储 mode=... secure=...`。
 - **仅 x86_64**：没有 ARM 真机验证，所以暂不发布 arm64 包。
 
 ---

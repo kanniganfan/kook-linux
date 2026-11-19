@@ -1,0 +1,264 @@
+#!/usr/bin/env node
+/**
+ * 上游兼容性检测（对应代码审查 P2-7）
+ *
+ * 用途：官方客户端每次升级后，判断哪些移植层需要跟着改。
+ *
+ *   node scripts/check-upstream.mjs --app ~/kook-port/linux/app
+ *   node scripts/check-upstream.mjs --app <官方安装目录>/resources/app --json
+ *   node scripts/check-upstream.mjs --app ~/kook-port/linux/app --write-baseline
+ *
+ * 检查四件事：
+ *   1. 版本三元组（version / buildVersion / config.commitId）
+ *   2. IPC 通道集合（src/browser_native/constants.js 的 IPCEventName）增删
+ *   3. preload 契约文件（src/preload/**、src/browser_native/preload/**）内容变化
+ *   4. 移植层引用了但新版已消失的通道（会被静默吞掉的回归点）
+ *
+ * 退出码：0 = 与基线一致；1 = 有漂移；2 = 参数/读取错误。
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const REPO = path.resolve(HERE, '..')
+const DEFAULT_BASELINE = path.join(REPO, 'patches', 'upstream-baseline.json')
+const PATCH_FILES = ['patches/main.js', 'patches/handlers.js', 'patches/preload-shim.js']
+
+function arg(name, def) {
+  const i = process.argv.indexOf('--' + name)
+  if (i === -1) return def
+  const v = process.argv[i + 1]
+  return v && !v.startsWith('--') ? v : true
+}
+
+function resolveApp(input) {
+  const p = path.resolve(String(input).replace(/^~(?=\/)/, process.env.HOME || '~'))
+  const candidates = [p, path.join(p, 'resources/app'), path.join(p, 'app')]
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, 'src', 'browser_native', 'constants.js'))) return c
+  }
+  throw new Error(`不是可识别的 KOOK app 目录（找不到 src/browser_native/constants.js）: ${p}`)
+}
+
+function walk(dir, out = []) {
+  if (!fs.existsSync(dir)) return out
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name)
+    if (e.isDirectory()) walk(p, out)
+    else out.push(p)
+  }
+  return out
+}
+
+const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)
+
+/** 通道名 → 定义行，用于在 diff 里给出位置提示 */
+function readChannels(app) {
+  const file = path.join(app, 'src', 'browser_native', 'constants.js')
+  const src = fs.readFileSync(file, 'utf8')
+  const req = createRequire(path.join(app, 'src', 'noop.js'))
+  const mod = req(file)
+  const list = Object.keys(mod.IPCEventName || {})
+  const lines = {}
+  for (const name of list) {
+    const m = src.match(new RegExp(`\\b${name}\\s*:`))
+    if (m) lines[name] = src.slice(0, m.index).split('\n').length
+  }
+  return { list, lines, hash: sha(fs.readFileSync(file)) }
+}
+
+function snapshot(app) {
+  const appPkg = path.join(app, 'package.json')
+  const pkg = fs.existsSync(appPkg) ? JSON.parse(fs.readFileSync(appPkg, 'utf8')) : {}
+  let cfg = {}
+  try {
+    cfg = JSON.parse(fs.readFileSync(path.join(app, 'src', 'config.json'), 'utf8'))
+  } catch {}
+
+  let chan
+  try {
+    chan = readChannels(app)
+  } catch (e) {
+    throw new Error(`constants.js 无法解析（上游可能重构了结构）：${e.message.split('\n')[0]}`)
+  }
+  const { list, lines, hash } = chan
+
+  const contractFiles = [
+    ...walk(path.join(app, 'src', 'preload')),
+    ...walk(path.join(app, 'src', 'browser_native', 'preload')),
+    path.join(app, 'src', 'browser_native', 'constants.js'),
+  ].filter((f) => fs.existsSync(f))
+
+  const hashes = {}
+  for (const f of contractFiles) hashes[path.relative(app, f)] = sha(fs.readFileSync(f))
+
+  const webappDir = path.join(app, 'webapp', 'build')
+  const webapp = walk(webappDir).map((f) => path.relative(webappDir, f)).sort()
+
+  return {
+    app: path.basename(path.dirname(app)) === 'app' ? app : app,
+    version: pkg.version || null,
+    buildVersion: pkg.buildVersion || null,
+    commitId: cfg.commitId || null,
+    channelCount: list.length,
+    channels: list,
+    channelLines: lines,
+    constantsHash: hash,
+    hashes,
+    webappFileCount: webapp.length,
+    webappHash: webapp.length ? sha(webapp.join('\n')) : null,
+    generatedAt: new Date().toISOString(),
+  }
+}
+
+/** 移植层源码里出现过的通道字符串 —— 用来发现「我们引用了、新版删了」的漂移 */
+function patchReferences() {
+  const refs = new Set()
+  for (const rel of PATCH_FILES) {
+    const file = path.join(REPO, rel)
+    if (!fs.existsSync(file)) continue
+    const src = fs.readFileSync(file, 'utf8')
+    for (const m of src.matchAll(/\b([A-Z][A-Z0-9_]{5,})\b/g)) refs.add(m[1])
+  }
+  return refs
+}
+
+function diff(base, cur) {
+  const b = new Set(base.channels || [])
+  const c = new Set(cur.channels || [])
+  const added = [...c].filter((x) => !b.has(x))
+  const removed = [...b].filter((x) => !c.has(x))
+
+  const filesChanged = []
+  const filesAdded = []
+  for (const [f, h] of Object.entries(cur.hashes)) {
+    if (!(f in (base.hashes || {}))) filesAdded.push(f)
+    else if (base.hashes[f] !== h) filesChanged.push(f)
+  }
+  const filesRemoved = Object.keys(base.hashes || {}).filter((f) => !(f in cur.hashes))
+
+  const versionChanged =
+    base.version !== cur.version ||
+    base.buildVersion !== cur.buildVersion ||
+    base.commitId !== cur.commitId
+
+  const refs = patchReferences()
+  const brokenRefs = removed.filter((ch) => refs.has(ch))
+
+  return {
+    versionChanged,
+    added,
+    removed,
+    filesAdded,
+    filesChanged,
+    filesRemoved,
+    brokenRefs,
+    webappChanged: base.webappHash !== cur.webappHash,
+    clean:
+      !versionChanged &&
+      added.length === 0 &&
+      removed.length === 0 &&
+      filesAdded.length === 0 &&
+      filesChanged.length === 0 &&
+      filesRemoved.length === 0,
+  }
+}
+
+function report(cur, d, base) {
+  const L = []
+  const tag = d.clean ? '✅ 与基线一致' : '⚠️ 检测到上游漂移'
+  L.push(`# 上游兼容性检测 · ${tag}`)
+  L.push('')
+  L.push(`- 目标目录：\`${cur.app}\``)
+  L.push(
+    `- 版本：${base.version} → **${cur.version}**（build ${base.buildVersion} → ${cur.buildVersion}）`
+  )
+  L.push(`- commitId：${base.commitId} → ${cur.commitId}`)
+  L.push(`- IPC 通道：${base.channelCount} → **${cur.channelCount}**`)
+  L.push('')
+  if (d.added.length) {
+    L.push(`## 新增通道（${d.added.length}）— 移植层默认落到 catch-all 桩，需补实现`)
+    L.push(d.added.map((x) => `- \`${x}\``).join('\n'))
+    L.push('')
+  }
+  if (d.removed.length) {
+    L.push(`## 移除通道（${d.removed.length}）`)
+    L.push(d.removed.map((x) => `- \`${x}\``).join('\n'))
+    L.push('')
+  }
+  if (d.brokenRefs.length) {
+    L.push(`## 🔴 移植层仍在引用的已删除通道（${d.brokenRefs.length}）— 必须处理`)
+    L.push(d.brokenRefs.map((x) => `- \`${x}\`（见 ${PATCH_FILES.join(' / ')}）`).join('\n'))
+    L.push('')
+  }
+  if (d.filesChanged.length || d.filesAdded.length || d.filesRemoved.length) {
+    L.push('## preload / constants 契约文件变化')
+    for (const f of d.filesChanged) L.push(`- 修改：\`${f}\``)
+    for (const f of d.filesAdded) L.push(`- 新增：\`${f}\``)
+    for (const f of d.filesRemoved) L.push(`- 删除：\`${f}\``)
+    L.push('')
+  }
+  if (d.webappChanged) L.push('- ⚠️ webapp/build 内容变化（前端资源整体换代）\n')
+  if (d.clean) L.push('无需改动移植层。\n')
+  L.push('## 建议动作')
+  if (d.clean) L.push('1. 跑一遍冒烟：启动客户端，检查 `[ipc:unknown]` 与 `handler error` 日志。')
+  else
+    [
+      '1. 先看 `brokenRefs`：这些通道在新版消失，移植层再返回旧值会变成无效分支。',
+      '2. `added` 里的通道逐个确认前端是否真的调用；被调用的补进 `patches/handlers.js`。',
+      '3. `preload` 变化通常意味着 IPC 入参/回参形状变了，对照 `docs/IPC-CONTRACT.md` 更新。',
+      '4. 全绿后 `--write-baseline` 更新基线并提交。',
+    ].forEach((s) => L.push(s))
+  return L.join('\n')
+}
+
+function main() {
+  const appArg = arg('app')
+  if (!appArg || appArg === true) {
+    console.error('用法：node scripts/check-upstream.mjs --app <KOOK app 目录> [--baseline 路径] [--json] [--write-baseline]')
+    process.exit(2)
+  }
+  let app
+  try {
+    app = resolveApp(appArg)
+  } catch (e) {
+    console.error(String(e.message))
+    process.exit(2)
+  }
+
+  let cur
+  try {
+    cur = snapshot(app)
+  } catch (e) {
+    console.error(String(e.message))
+    process.exit(2)
+  }
+  const baselinePath = path.resolve(String(arg('baseline', DEFAULT_BASELINE)))
+
+  if (arg('write-baseline', false)) {
+    const out = { ...cur, app: undefined }
+    fs.mkdirSync(path.dirname(baselinePath), { recursive: true })
+    fs.writeFileSync(baselinePath, JSON.stringify(out, null, 2) + '\n')
+    console.log(`基线已写入 ${path.relative(REPO, baselinePath)}（${cur.channelCount} 通道）`)
+    return
+  }
+
+  if (!fs.existsSync(baselinePath)) {
+    console.error(`找不到基线 ${baselinePath}，先跑一次 --write-baseline`)
+    process.exit(2)
+  }
+  const base = JSON.parse(fs.readFileSync(baselinePath, 'utf8'))
+  const d = diff(base, cur)
+
+  if (arg('json', false)) {
+    console.log(JSON.stringify({ target: cur.app, current: { version: cur.version, channels: cur.channelCount }, drift: d }, null, 2))
+  } else {
+    console.log(report(cur, d, base))
+  }
+  process.exit(d.clean ? 0 : 1)
+}
+
+main()
