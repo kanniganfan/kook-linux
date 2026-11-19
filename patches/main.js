@@ -1176,6 +1176,24 @@ function installWindowControls() {
   }
   registerCapture('DESKTOP_CAPTURER_GET_SOURCES')
   registerCapture('DESKTOP_CAPTURER_GET_SOURCES_SYNC')
+
+  // 官方 preload（src/browser_native/preload/window.js:129）用 send 调这个通道设置
+  // 窗口初始尺寸，参数是 (width, height)。原先主进程没注册，落进 catch-all 返回 {}，
+  // 表现为「设置窗口尺寸」永远空转。这里补上真实实现。
+  try { ipcMain.removeAllListeners('WINDOW_SET_SIZE_ORIGIN') } catch {}
+  ipcMain.on('WINDOW_SET_SIZE_ORIGIN', (e, width, height) => {
+    const w = Math.round(Number(width))
+    const h = Math.round(Number(height))
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win.isDestroyed()) return
+    try {
+      win.setContentSize(w, h)
+      LOG('[win] 设置内容尺寸', w, 'x', h)
+    } catch (err) {
+      LOG('[win] 设置内容尺寸失败', err && err.message)
+    }
+  })
   LOG('窗口控制已接管', Object.keys(acts).length + Object.keys(queries).length, '个通道（invoke + send 双通道）')
 }
 
