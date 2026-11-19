@@ -76,6 +76,7 @@ const TRACE = (kind, name, ...rest) => {
 
 const { net } = require('electron')
 const { createRuntime } = require(path.join(__dirname, 'handlers.js'))
+const { applyContentSize } = require(path.join(__dirname, 'window-size.js'))
 let runtime = null
 process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = '1'
 
@@ -1196,17 +1197,7 @@ function installWindowControls() {
   // 表现为「设置窗口尺寸」永远空转。这里补上真实实现。
   try { ipcMain.removeAllListeners('WINDOW_SET_SIZE_ORIGIN') } catch {}
   ipcMain.on('WINDOW_SET_SIZE_ORIGIN', (e, width, height) => {
-    const w = Math.round(Number(width))
-    const h = Math.round(Number(height))
-    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return
-    const win = BrowserWindow.fromWebContents(e.sender)
-    if (!win || win.isDestroyed()) return
-    try {
-      win.setContentSize(w, h)
-      LOG('[win] 设置内容尺寸', w, 'x', h)
-    } catch (err) {
-      LOG('[win] 设置内容尺寸失败', err && err.message)
-    }
+    applyContentSize(BrowserWindow.fromWebContents(e.sender), width, height, LOG)
   })
   LOG('窗口控制已接管', Object.keys(acts).length + Object.keys(queries).length, '个通道（invoke + send 双通道）')
 }

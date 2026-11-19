@@ -82,12 +82,39 @@ XSS，攻击者仍能在允许的域名内申请麦克风。进一步收紧需�
 
 ---
 
-## P0-3 登录凭据加密降级
+## P0-3 登录凭据加密降级 —— **已修复** ✅
 
 `safeStorage` 不可用时退化为 Base64（只是编码，不提供保密性）。
 
-**状态**：待处理，由 YS-逆向 负责。
-改造方向：优先走 libsecret / kwallet，确实不可用时显式提示，不静默降级。
+**状态**：已在 v0.0.12 修复。现在按四层递降，没有「静默 Base64」这条路径：
+
+| 优先级 | 条件 | 产物 | 日志 `mode=` |
+|---|---|---|---|
+| 1 | `safeStorage` 且后端是真后端（`gnome_libsecret` / `kwallet*`） | Electron 密文 | `safeStorage` |
+| 2 | 有 `secret-tool`（libsecret Secret Service） | 自管 AES-256 主密钥 + AES-256-GCM，格式 `v2:iv:tag:ct` | `keyring` |
+| 3 | 两者都没有 | **拒绝落盘**，返回空串 + 一次性弹窗说明 | `none` |
+| 4 | 显式 `KOOK_INSECURE_STORE=1` | `v0:` 前缀明文 + 警告弹窗 | `insecure` |
+
+**这一条里最容易被忽略的事实**：Electron 在 Linux 上的 `basic_text` 后端使用的是
+Chromium 内置的硬编码口令，`safeStorage.isEncryptionAvailable()` **仍然返回 `true`**，
+但实际等同明文。如果按常见写法只判断 `isEncryptionAvailable()`，这层防护形同虚设。
+实现里用 `getSelectedStorageBackend()` 把 `basic_text` 单独摘出来，判为不安全。
+
+**历史数据迁移**：读取 `important.ka` 时识别三种旧格式（Electron 密文 / `v0:` / 旧版裸 Base64），
+发现裸 Base64 且当前有安全后端时当场重加密回写，同一存储里的其他键原样保留。
+
+**实测**（隔离 Electron 进程，真实调用 `createRuntime`，非 mock）：
+
+| 场景 | 后端判定 | 产物 | 往返 |
+|---|---|---|---|
+| 本机正常 | `safeStorage · gnome_libsecret` | Electron 密文 | ✅ |
+| 屏蔽 safeStorage | `keyring · libsecret` | `v2:` AES-GCM | ✅ |
+| 两者都无 | `none` | 空（拒绝保存） | 按设计失败 |
+| 同上 + `KOOK_INSECURE_STORE=1` | `insecure` | `v0:` + 警告 | ✅ |
+| 种入旧版明文 `ka` | `keyring` | 落盘变 `v2:`，其他键未丢 | ✅ |
+
+**代价（用户可感知）**：没有密钥环的机器会丢掉「记住登录」，每次启动都要重新登录。
+这是刻意的取舍——把明文等价物当作正常持久化结果，等于这层加固白做。降级路径与恢复方法写在 README「已知限制」。
 
 ---
 
@@ -116,13 +143,29 @@ XSS，攻击者仍能在允许的域名内申请麦克风。进一步收紧需�
 
 ---
 
-## P1-5 IPC 空实现与降级行为
+## P1-5 IPC 空实现与降级行为 —— **已交付** ✅
 
-**状态**：待处理，由 YS-逆向分析 产出 `docs/IPC-CONTRACT.md`，
-按「已完整实现 / Linux 替代实现 / 明确不支持 / 临时兼容桩 / 尚未验证」分类。
+**状态**：已完成，产出 [docs/IPC-CONTRACT.md](IPC-CONTRACT.md)（209 条全覆盖）。
 
-当前事实：总通道 209 个，挂载真实实现 177 个，其余为有意为之的空实现
-（Windows 注册表、系统代理等 Linux 上无对应物的能力）。
+| 类别 | 含义 | 数量 |
+|---|---|---:|
+| A | 已完整实现 | 91 |
+| B | Linux 替代实现 | 33 |
+| C | 明确不支持 | 27 |
+| D | 临时兼容桩 | 58 |
+
+三条实质发现（都已修）：
+
+- `WINDOW_SET_SIZE_ORIGIN` 静默无效：preload 在 `window.js:129` 用 `send` 调用，主进程从未注册，
+  请求落到 catch-all 返回 `{}`，所以「设置窗口初始尺寸」一直是空转。已补真实实现。
+- 两条伪成功：`SYSTEM_GET_FILE` 返回 `{code:0,data:null}`、`SYSTEM_SWITCH_SERVER_API`
+  返回 `true` 但根本没切域名。现在前者走真实 `dialog.showOpenDialog`（无窗口时返回 `-1`
+  而不是弹窗挂死 `sendSync` 调用方），后者真读白名单、真写 `linux-store/domain.json`、重启仍生效。
+- `GET_ACTIVE_DOMAIN` 形状不符：原返回 `{origin, api}`，而官方 `runtime-domain.js` 读
+  `activeApiOrigin`，所以域名选择一路回落到 `config.appServer`——不是「切不动」，是**没接上**。
+  现在返回官方形状，旧键保留兜底。
+
+形状类问题单列在契约表 §9.2，不与 A/B/C/D 分类混在一起，否则「注册了但字段错」会被归类掩盖。
 
 ---
 
@@ -131,7 +174,8 @@ XSS，攻击者仍能在允许的域名内申请麦克风。进一步收紧需�
 | 项 | 状态 |
 |---|---|
 | 主进程模块化（main.js 约 2600 行） | 计划中，优先级低于安全项 |
-| 上游版本兼容性检测 | 待 YS-逆向分析 出方案 |
+| 上游版本兼容性检测 | ✅ 已落地 `scripts/check-upstream.mjs` + `patches/upstream-baseline.json`（209 通道 + 43 个契约文件哈希 + webapp 指纹） |
+| 处理器自动化测试 | 进行中（文件选择 / 服务器切换 / 窗口尺寸三条先做） |
 | CI 自动构建 / 测试矩阵 | 计划中 |
 | SHA-256 校验 | 已在 Release 说明中提供 |
 

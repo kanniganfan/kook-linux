@@ -38,7 +38,8 @@ Linux 客户端，也没有公开的 Linux 发布计划**。Linux 用户只能�
 进程枚举、屏幕采集、托盘、全局快捷键、窗口行为——在 Linux 上重新实现一遍。
 
 所以它不是一个"仿 KOOK 的客户端"，也不是把网页塞进 Electron 的壳：
-**协议、接口、界面全部来自官方本体**，209 个 IPC 通道逐个真实现，没有任何空壳占位。
+**协议、接口、界面全部来自官方本体**，209 条 IPC 通道逐条对齐并写明实现状态，
+不存在"返回成功但什么也没做"的伪实现。
 
 | | |
 |---|---|
@@ -58,6 +59,7 @@ Linux 客户端，也没有公开的 Linux 发布计划**。Linux 用户只能�
 - [简介](#简介)
 - [功能](#功能)
 - [技术实现](#技术实现)
+- [安全](#安全)
 - [安装](#安装)
 - [兼容性](#兼容性)
 - [常见问题](#常见问题)
@@ -117,8 +119,16 @@ Linux 客户端，也没有公开的 Linux 发布计划**。Linux 用户只能�
 ### IPC 层
 
 原版 preload 定义 **209 个 IPC 通道**，主进程侧必须全部应答，否则界面会在某个操作上卡死。
-移植层按契约逐个实现，其中窗口控制占了 26 个（invoke / send 双通道），
-最终挂载 **177 个真实通道**，其余是有意为之的空实现（Windows 注册表、系统代理之类）。
+移植层按契约逐条实现，其中窗口控制占了 26 个（invoke / send 双通道）。当前分布：
+
+| 类别 | 含义 | 数量 |
+|---|---|---:|
+| A | 已完整实现 | 91 |
+| B | Linux 替代实现 | 33 |
+| C | 明确不支持（Linux 无对应物，如 Windows 注册表、系统代理） | 27 |
+| D | 临时兼容桩（返回确定语义，不假装成功） | 58 |
+
+逐条状态、插图与形状契约见 [docs/IPC-CONTRACT.md](docs/IPC-CONTRACT.md)。
 
 ### 资源加载
 
@@ -163,6 +173,34 @@ Windows 用 DXGI 抓屏，Linux 换成 **xdg-desktop-portal + PipeWire**：
 
 启动时探测 `python` / `dbus` / `gstreamer` / `xprop` / `ffmpeg` 是否可用，
 缺哪个就在对应功能上降级，不影响其它部分。不写死任何发行版路径，全部走 XDG 规范。
+
+---
+
+## 安全
+
+移植层跑的是官方 webapp，边界都在主进程这一侧。已做的加固逐条如下，全部有实测数据，
+完整记录见 [docs/SECURITY.md](docs/SECURITY.md)。
+
+| 项 | 现状 | 说明 |
+|---|---|---|
+| `webSecurity` | **开启** | 实测开启后页面文本 5721 字符 / 2989 节点，比关闭时（337 / 1292）加载更完整 |
+| `contextIsolation` | 保持 `false` | 官方 preload 依赖往 `window` 注入对象，开启后白屏（文本 0 / 61 节点） |
+| `sandbox` | 保持 `false` | preload 需要 Node 能力；AppImage 在只读 squashfs 上无法给 `chrome-sandbox` 设 SUID |
+| `nodeIntegration` | `false` | 官方默认值，未改动 |
+| 权限请求 | **校验来源** | `notifications` / `media` / `display-capture` / `clipboard-*` 只放行 `*.kookapp.cn`、本地资源服务、`file` 与 devtools，其余拒绝并记日志 |
+| 登录凭据 | **四层递降** | 真后端 `safeStorage` → `secret-tool` + AES-256-GCM → 拒绝落盘 → 显式 `KOOK_INSECURE_STORE=1` 才允许 `v0:` 明文 |
+| 自动更新 | **禁用** | 更新器会装 Windows 包覆盖当前安装，打包时删掉 `app-update.yml` 并断掉更新通道 |
+| 上游变更 | **可检测** | `scripts/check-upstream.mjs` 对比 209 条通道、43 个契约文件哈希与 webapp 指纹，官方升级后跑一次即知差异 |
+
+**一个值得单独说的点**：Linux 上 Electron 的 `basic_text` 后端用 Chromium 内置硬编码口令，
+`safeStorage.isEncryptionAvailable()` 照样返回 `true`，但实际等于明文。只按这个 API 判断，
+凭据加密就是摆设——所以实现里用 `getSelectedStorageBackend()` 把 `basic_text` 单独排除。
+
+**保留的弱点**（不假装已解决）：
+
+- 权限白名单是域名级的，不是每次调用二次确认。webapp 自身若出现 XSS，攻击者仍能在允许域名内申请麦克风。
+- `contextIsolation` / `sandbox` 受官方 preload 与 AppImage 形态限制，强行开启客户端直接白屏。
+- 主进程 IPC 全部走官方通道名，未做参数级模糊测试。
 
 ---
 
@@ -306,6 +344,24 @@ bash scripts/build-rpm.sh       # 单独出 rpm（绕开 fpm）
 
 详细步骤、依赖和踩坑记录见 [docs/BUILD.md](docs/BUILD.md)。
 
+### 跑测试
+
+```bash
+bash tests/run-tests.sh
+# 系统里没有 node_modules 里的 Electron 时：
+ELECTRON=/path/to/electron bash tests/run-tests.sh
+```
+
+三组共 40+ 断言，全部在真实运行时上跑，不是 mock：
+
+| 组 | 覆盖 | 运行环境 |
+|---|---|---|
+| 窗口尺寸 | `WINDOW_SET_SIZE_ORIGIN` 参数校验、浮点取整、窗口销毁、异常吞并 | 纯 Node |
+| IPC 默认态 | `SYSTEM_GET_FILE` 无窗口返回 `-1`、域名切换白名单/别名/落盘/复原、`GET_ACTIVE_DOMAIN` 形状、设备指纹零漂移 | 真实 Electron |
+| IPC 灰度态 | `KOOK_DEVICE_DETAIL_FULL=1` 下 `{bios, machine, device_id}`、`device_id` 与 `GET_UNIQUE` 同源、跨进程重启值不变 | 真实 Electron（同一 userData 跑两轮） |
+
+默认态那一组锁的是「不许悄悄改变老用户指纹」，灰度态那一组锁的是「改的时候必须三条通道一起改」。
+
 209 个 IPC 通道的实现状态分类见 [docs/IPC-CONTRACT.md](docs/IPC-CONTRACT.md)；Electron 安全配置的实测结论见 [docs/SECURITY.md](docs/SECURITY.md)。
 
 ---
@@ -321,6 +377,7 @@ patches/              移植层：覆盖到 app 目录上的文件
 ├── handlers.js         209 个 IPC 通道的真实实现
 ├── preload-shim.js     预加载钩子：原生模块打桩、字体、按键桥
 ├── device-identity.js  设备指纹（服务端登录风控需要）
+├── window-size.js      窗口初始尺寸（WINDOW_SET_SIZE_ORIGIN）的可测试实现
 ├── upstream-baseline.json  上游契约基线（209 通道 + 文件哈希）
 ├── resourse/kook.png   官方 logo
 └── src/
@@ -332,6 +389,7 @@ patches/              移植层：覆盖到 app 目录上的文件
     ├── preload/auto-launch.js                    改过的官方文件（XDG 自启）
     └── renderer/linux-overlay/                   屏幕覆盖层页面
 scripts/              组装与打包脚本；check-upstream.mjs 做上游版本兼容性检测
+tests/                回归测试（窗口尺寸纯 Node，IPC 处理器真实 Electron）
 build/                打包资源（图标、desktop 模板、afterPack 钩子）
 docs/                 构建说明、IPC 契约表、安全配置说明
 .github/              Issue 模板、Release 说明模板
@@ -352,6 +410,10 @@ docs/                 构建说明、IPC 契约表、安全配置说明
   可设 `KOOK_INSECURE_STORE=1`，凭据会以带 `v0:` 标记的明文保存并弹窗警告。
   启动日志里会打印当前用的是哪一层：`[secret] 凭据存储 mode=... secure=...`。
 - **仅 x86_64**：没有 ARM 真机验证，所以暂不发布 arm64 包。
+- **设备指纹默认沿用旧形状**：官方要 `{bios, machine, device_id}`，当前只发 `device_id`（`{id, type}`）。
+  完整形状已实现但默认关闭，需显式 `KOOK_DEVICE_DETAIL_FULL=1` 开启。原因是补齐会换掉设备标识，
+  可能被判成新设备并触发一次重新登录；这个开关**不是幂等的**——开与关各变一次指纹，
+  要试就一路开着，别来回切。
 
 ---
 
