@@ -8,11 +8,13 @@
  *   node scripts/check-upstream.mjs --app <官方安装目录>/resources/app --json
  *   node scripts/check-upstream.mjs --app ~/kook-port/linux/app --write-baseline
  *
- * 检查四件事：
+ * 检查五件事：
  *   1. 版本三元组（version / buildVersion / config.commitId）
  *   2. IPC 通道集合（src/browser_native/constants.js 的 IPCEventName）增删
  *   3. preload 契约文件（src/preload/**、src/browser_native/preload/**）内容变化
  *   4. 移植层引用了但新版已消失的通道（会被静默吞掉的回归点）
+ *   5. webapp 资源：路径增删改名 与 内容变化 分开报；契约相关的关键文件（设备指纹
+ *      拼装、域名运行时）按逻辑名单独登记，路径漂移与内容漂移分别报告
  *
  * 退出码：0 = 与基线一致；1 = 有漂移；2 = 参数/读取错误。
  */
@@ -26,6 +28,20 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..')
 const DEFAULT_BASELINE = path.join(REPO, 'patches', 'upstream-baseline.json')
 const PATCH_FILES = ['patches/main.js', 'patches/handlers.js', 'patches/preload-shim.js']
+const SCHEMA = 2
+
+/**
+ * 契约相关的关键文件：按「逻辑名」登记，避免官方换文件名后对不上。
+ *  - rel:    固定相对路径
+ *  - marker: 在 webapp 的 static/js 里按内容特征定位（文件名带内容哈希，会变）
+ */
+const KEY_FILES = [
+  { name: 'webapp-entry', rel: 'webapp/build/index.htm' },
+  { name: 'preload-runtime-domain', rel: 'src/preload/runtime-domain.js' },
+  { name: 'preload-system', rel: 'src/browser_native/preload/system.js' },
+  { name: 'device-feature-builder', webappMarker: 'x-client-username' },
+  { name: 'device-detail-consumer', webappMarker: 'is_in_vm_by_cpu_id' },
+]
 
 function arg(name, def) {
   const i = process.argv.indexOf('--' + name)
@@ -70,6 +86,65 @@ function readChannels(app) {
   return { list, lines, hash: sha(fs.readFileSync(file)) }
 }
 
+/** webapp 资源指纹：路径集合与内容分别算，便于区分「改名」和「改内容」 */
+function readWebapp(app) {
+  const dir = path.join(app, 'webapp', 'build')
+  const files = walk(dir).map((f) => path.relative(dir, f)).sort()
+  if (!files.length) return { fileCount: 0, totalBytes: 0, pathDigest: null, contentDigest: null }
+  const rows = []
+  let totalBytes = 0
+  for (const rel of files) {
+    const abs = path.join(dir, rel)
+    const buf = fs.readFileSync(abs)
+    totalBytes += buf.length
+    rows.push(`${rel}\u0000${buf.length}\u0000${sha(buf)}`)
+  }
+  return {
+    fileCount: files.length,
+    totalBytes,
+    pathDigest: sha(files.join('\n')),
+    contentDigest: sha(rows.join('\n')),
+  }
+}
+
+/** 关键文件解析：固定路径 + webapp 内容特征匹配 */
+function readKeyFiles(app) {
+  const out = {}
+  for (const spec of KEY_FILES) {
+    const entry = { paths: [], hashes: {} }
+    if (spec.rel) {
+      const abs = path.join(app, spec.rel)
+      if (fs.existsSync(abs)) {
+        entry.paths.push(spec.rel)
+        entry.hashes[spec.rel] = sha(fs.readFileSync(abs))
+      }
+    }
+    if (spec.webappMarker) {
+      const jsDir = path.join(app, 'webapp', 'build', 'static', 'js')
+      const marker = Buffer.from(spec.webappMarker)
+      for (const f of walk(jsDir)) {
+        if (!f.endsWith('.js')) continue
+        let buf
+        try {
+          const st = fs.statSync(f)
+          if (st.size > 24 * 1024 * 1024) continue
+          buf = fs.readFileSync(f)
+        } catch {
+          continue
+        }
+        if (buf.includes(marker)) {
+          const rel = path.relative(app, f)
+          entry.paths.push(rel)
+          entry.hashes[rel] = sha(buf)
+        }
+      }
+      entry.paths.sort()
+    }
+    out[spec.name] = entry
+  }
+  return out
+}
+
 function snapshot(app) {
   const appPkg = path.join(app, 'package.json')
   const pkg = fs.existsSync(appPkg) ? JSON.parse(fs.readFileSync(appPkg, 'utf8')) : {}
@@ -84,7 +159,6 @@ function snapshot(app) {
   } catch (e) {
     throw new Error(`constants.js 无法解析（上游可能重构了结构）：${e.message.split('\n')[0]}`)
   }
-  const { list, lines, hash } = chan
 
   const contractFiles = [
     ...walk(path.join(app, 'src', 'preload')),
@@ -95,21 +169,19 @@ function snapshot(app) {
   const hashes = {}
   for (const f of contractFiles) hashes[path.relative(app, f)] = sha(fs.readFileSync(f))
 
-  const webappDir = path.join(app, 'webapp', 'build')
-  const webapp = walk(webappDir).map((f) => path.relative(webappDir, f)).sort()
-
   return {
-    app: path.basename(path.dirname(app)) === 'app' ? app : app,
+    schema: SCHEMA,
+    app,
     version: pkg.version || null,
     buildVersion: pkg.buildVersion || null,
     commitId: cfg.commitId || null,
-    channelCount: list.length,
-    channels: list,
-    channelLines: lines,
-    constantsHash: hash,
+    channelCount: chan.list.length,
+    channels: chan.list,
+    channelLines: chan.lines,
+    constantsHash: chan.hash,
     hashes,
-    webappFileCount: webapp.length,
-    webappHash: webapp.length ? sha(webapp.join('\n')) : null,
+    webapp: readWebapp(app),
+    keyFiles: readKeyFiles(app),
     generatedAt: new Date().toISOString(),
   }
 }
@@ -148,6 +220,35 @@ function diff(base, cur) {
   const refs = patchReferences()
   const brokenRefs = removed.filter((ch) => refs.has(ch))
 
+  // webapp：路径集合变化（增删/改名）与内容变化分开
+  const bw = base.webapp || null
+  const cw = cur.webapp
+  const webappLegacy = !bw
+  const webappPathChanged = !!bw && bw.pathDigest !== cw.pathDigest
+  const webappContentChanged = !!bw && !webappPathChanged && bw.contentDigest !== cw.contentDigest
+  const webappAnyChange =
+    !!bw &&
+    (webappPathChanged ||
+      webappContentChanged ||
+      bw.fileCount !== cw.fileCount ||
+      bw.totalBytes !== cw.totalBytes)
+
+  // 关键文件：按逻辑名比对路径漂移与内容漂移
+  const keyDrift = []
+  for (const spec of KEY_FILES) {
+    const bk = (base.keyFiles || {})[spec.name] || { paths: [], hashes: {} }
+    const ck = cur.keyFiles[spec.name] || { paths: [], hashes: {} }
+    const bset = new Set(bk.paths)
+    const cset = new Set(ck.paths)
+    const pathAdded = ck.paths.filter((p) => !bset.has(p))
+    const pathRemoved = bk.paths.filter((p) => !cset.has(p))
+    const contentChanged = ck.paths.filter((p) => bset.has(p) && bk.hashes[p] !== ck.hashes[p])
+    const missing = ck.paths.length === 0
+    if (pathAdded.length || pathRemoved.length || contentChanged.length || missing) {
+      keyDrift.push({ name: spec.name, pathAdded, pathRemoved, contentChanged, missing })
+    }
+  }
+
   return {
     versionChanged,
     added,
@@ -156,14 +257,20 @@ function diff(base, cur) {
     filesChanged,
     filesRemoved,
     brokenRefs,
-    webappChanged: base.webappHash !== cur.webappHash,
+    webappLegacy,
+    webappPathChanged,
+    webappContentChanged,
+    webappAnyChange,
+    keyDrift,
     clean:
       !versionChanged &&
       added.length === 0 &&
       removed.length === 0 &&
       filesAdded.length === 0 &&
       filesChanged.length === 0 &&
-      filesRemoved.length === 0,
+      filesRemoved.length === 0 &&
+      !webappAnyChange &&
+      keyDrift.length === 0,
   }
 }
 
@@ -178,7 +285,14 @@ function report(cur, d, base) {
   )
   L.push(`- commitId：${base.commitId} → ${cur.commitId}`)
   L.push(`- IPC 通道：${base.channelCount} → **${cur.channelCount}**`)
+  L.push(
+    `- webapp：${base.webapp ? base.webapp.fileCount : '?'} → ${cur.webapp.fileCount} 个文件，` +
+      `${(cur.webapp.totalBytes / 1048576).toFixed(1)} MB`
+  )
   L.push('')
+  if (d.webappLegacy) {
+    L.push('> 基线是旧格式（没有 webapp 内容指纹），本次不做 webapp 比对；处理后请 `--write-baseline`。\n')
+  }
   if (d.added.length) {
     L.push(`## 新增通道（${d.added.length}）— 移植层默认落到 catch-all 桩，需补实现`)
     L.push(d.added.map((x) => `- \`${x}\``).join('\n'))
@@ -201,24 +315,49 @@ function report(cur, d, base) {
     for (const f of d.filesRemoved) L.push(`- 删除：\`${f}\``)
     L.push('')
   }
-  if (d.webappChanged) L.push('- ⚠️ webapp/build 内容变化（前端资源整体换代）\n')
+  if (d.webappPathChanged) {
+    L.push('## webapp 文件增删 / 改名')
+    L.push('路径集合变了，说明前端资源整体换代或分块重命名；`[chunk]` 名带内容哈希是正常的。')
+    L.push('')
+  } else if (d.webappContentChanged) {
+    L.push('## 🔴 webapp 内容变化（文件名没变）')
+    L.push('**这正是旧版脚本漏检的情况**：路径列表一样，内容被替换。前端的 IPC 调用形状可能一起变了，')
+    L.push('请对照 `docs/IPC-CONTRACT.md` 复核受影响的通道。')
+    L.push('')
+  }
+  if (d.keyDrift.length) {
+    L.push('## 关键契约文件漂移')
+    for (const k of d.keyDrift) {
+      L.push(`### ${k.name}`)
+      if (k.missing) L.push('- ⚠️ 新版里找不到（特征串消失或文件被删）')
+      for (const p of k.pathAdded) L.push(`- 路径新增：\`${p}\``)
+      for (const p of k.pathRemoved) L.push(`- 路径消失：\`${p}\``)
+      for (const p of k.contentChanged) L.push(`- 内容变化：\`${p}\``)
+      L.push('')
+    }
+  }
   if (d.clean) L.push('无需改动移植层。\n')
   L.push('## 建议动作')
-  if (d.clean) L.push('1. 跑一遍冒烟：启动客户端，检查 `[ipc:unknown]` 与 `handler error` 日志。')
-  else
-    [
+  if (d.clean) {
+    L.push('1. 跑一遍冒烟：启动客户端，检查 `[ipc:unknown]` 与 `handler error` 日志。')
+  } else {
+    ;[
       '1. 先看 `brokenRefs`：这些通道在新版消失，移植层再返回旧值会变成无效分支。',
       '2. `added` 里的通道逐个确认前端是否真的调用；被调用的补进 `patches/handlers.js`。',
-      '3. `preload` 变化通常意味着 IPC 入参/回参形状变了，对照 `docs/IPC-CONTRACT.md` 更新。',
-      '4. 全绿后 `--write-baseline` 更新基线并提交。',
+      '3. 关键契约文件漂移优先处理（设备指纹、域名运行时），形状错了功能会静默失效。',
+      '4. `preload` 变化通常意味着 IPC 入参/回参形状变了，对照 `docs/IPC-CONTRACT.md` 更新。',
+      '5. 全绿后 `--write-baseline` 更新基线并提交。',
     ].forEach((s) => L.push(s))
+  }
   return L.join('\n')
 }
 
 function main() {
   const appArg = arg('app')
   if (!appArg || appArg === true) {
-    console.error('用法：node scripts/check-upstream.mjs --app <KOOK app 目录> [--baseline 路径] [--json] [--write-baseline]')
+    console.error(
+      '用法：node scripts/check-upstream.mjs --app <KOOK app 目录> [--baseline 路径] [--json] [--write-baseline]'
+    )
     process.exit(2)
   }
   let app
@@ -236,13 +375,18 @@ function main() {
     console.error(String(e.message))
     process.exit(2)
   }
+
   const baselinePath = path.resolve(String(arg('baseline', DEFAULT_BASELINE)))
 
   if (arg('write-baseline', false)) {
-    const out = { ...cur, app: undefined }
+    const out = { ...cur }
+    delete out.app
     fs.mkdirSync(path.dirname(baselinePath), { recursive: true })
     fs.writeFileSync(baselinePath, JSON.stringify(out, null, 2) + '\n')
-    console.log(`基线已写入 ${path.relative(REPO, baselinePath)}（${cur.channelCount} 通道）`)
+    console.log(
+      `基线已写入 ${path.relative(REPO, baselinePath)}（${cur.channelCount} 通道，` +
+        `webapp ${cur.webapp.fileCount} 文件 / ${(cur.webapp.totalBytes / 1048576).toFixed(1)} MB）`
+    )
     return
   }
 
@@ -254,7 +398,17 @@ function main() {
   const d = diff(base, cur)
 
   if (arg('json', false)) {
-    console.log(JSON.stringify({ target: cur.app, current: { version: cur.version, channels: cur.channelCount }, drift: d }, null, 2))
+    console.log(
+      JSON.stringify(
+        {
+          target: cur.app,
+          current: { version: cur.version, channels: cur.channelCount, webapp: cur.webapp.fileCount },
+          drift: d,
+        },
+        null,
+        2
+      )
+    )
   } else {
     console.log(report(cur, d, base))
   }

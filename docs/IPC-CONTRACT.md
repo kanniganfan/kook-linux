@@ -1,6 +1,6 @@
 # KOOK Linux 移植版 · IPC 契约表
 
-> 适用版本：v0.0.11+（`patches/` 当前实现）
+> 适用版本：v0.0.12 发布后的 `main`（含 0.0.13 待发布改动）
 > 上游基线：官方 PC 客户端 **0.112.0**（build `0.112.0`，commit `c5af7134`），通道数 **209**
 > 生成日期：2026-11-19 · 生成方式：静态分析 `patches/main.js`、`patches/handlers.js`、`patches/preload-shim.js`
 > 对应代码审查条目：**P1-5（IPC 空实现与降级行为）**，并附 **P2-7（上游兼容性检测）** 方案
@@ -303,7 +303,7 @@ WINDOW_IS_MIN WINDOW_IS_VISIBLE
 | `SYSTEM_GET_ACTIVE_DOMAIN` | 原返回 `{origin, api}`，官方读 `activeApiOrigin` / `activeH5Origin` / `activeFirstPartyOrigins` → 取到 `undefined`，一路回落 `config.appServer`，**域名切换从未真正生效** | `src/preload/runtime-domain.js:21`（`selection.activeApiOrigin \|\| config.appServer`） | 已修：返回官方形状，旧键保留兜底 |
 | `SYSTEM_GET_FILE` | 返回 `{code:0,data:null}`：声称成功但无数据 | `patches/handlers.js` 原实现 | 已修：真实 `dialog.showOpenDialog`；**无窗口时返回 `code:-1`**，避免无头环境弹窗挂死 `sendSync` 调用方 |
 | `SYSTEM_SWITCH_SERVER_API` | 恒 `return true`，从未切换 | 原实现 | 已修：白名单 + 写 `linux-store/domain.json` + 重启生效 |
-| `SYSTEM_GET_UNIQUE_DETAIL` | 官方取 `{bios, machine, device_id}`，原实现只回 `{id, type:'linux'}` → 前两项 `undefined` | `webapp/build/static/js/2557.*.js`：构造请求头时取 `n.bios` / `n.machine` / `n.device_id` | **已实现 · 灰度默认关**（见下方说明） |
+| `SYSTEM_GET_UNIQUE_DETAIL` | 官方取 `{bios, machine, device_id}`，原实现只回 `{id, type:'linux'}` → 前两项 `undefined` | `webapp/build/static/js/2557.*.js`：构造请求头时取 `n.bios` / `n.machine` / `n.device_id` | **已实现 · 真机验证通过**（灰度默认关，见 9.2.1） |
 
 结论：新增/修改通道时，**必须回读官方 preload 或 webapp 的实际取值方式**，不能只看通道名对不对。
 
@@ -317,15 +317,19 @@ WINDOW_IS_MIN WINDOW_IS_VISIBLE
 - 两条通道共用同一份进程内记忆化指纹，运行期间不会抖动；开启时打一行 `[device] 灰度开启…`（带三个值）便于对照日志。
 - **开关不是幂等的**：开启后指纹从 `machineId` 变成 UUID，**关回去还会再变一次**，两个方向都可能被服务端判成新设备。真机验证应当「开着跑一轮并保持」，不要来回切。
 - 默认值保证老用户指纹零漂移，这也是它默认关闭的原因。
+- **真机验证（0.0.12 → 开发版，真实账号）**：开启灰度后 `device_id=d8da83cc-47e6-469d-aaa1-ad9b7cd14d94`、`bios=21d1589c…`、`machine=7953cf63…`，页面文本 5718 / 节点 2977，`api/v3/user/settings`、`guild/index`、`feature-gray/match` 全部 200，**无 401/403、无风控页、无需重登**。
+- 验证结束后已把指纹**恢复原状**：关闭灰度时 `GET_UNIQUE` 回到 `0c68b3cf…`（与 0.0.12 安装版一致），避免两个版本来回切换时反复变更指纹。
 
 ## 10. 上游兼容性检测（P2-7）
 
-已落地的两个文件：
+两个文件：
 
 | 文件 | 作用 |
 |---|---|
-| `patches/upstream-baseline.json` | 基线快照：版本三元组、209 个通道名、43 个契约文件哈希、webapp 指纹 |
-| `scripts/check-upstream.mjs` | 与基线比对，输出漂移报告；`--write-baseline` 更新基线 |
+| `patches/upstream-baseline.json` | 基线快照（schema 2）：版本三元组、209 个通道名、43 个契约文件哈希、webapp 路径/内容双指纹、5 个关键契约文件 |
+| `scripts/check-upstream.mjs` | 与基线比对并输出漂移报告；`--write-baseline` 重建基线 |
+
+> 基线应当是**官方原始安装**（解包后的 `resources/app`）的快照，不要拿打过补丁的开发目录去生成——否则我们的改动会被当成上游基线，真实上游变化反而被掩盖。
 
 用法：
 
@@ -340,19 +344,50 @@ node scripts/check-upstream.mjs --app <dir> --json ; echo $?   # 0=一致 1=漂�
 node scripts/check-upstream.mjs --app <dir> --write-baseline
 ```
 
-检测五个维度：
+检测六个维度：
 
-1. **版本**：`version` / `buildVersion` / `config.commitId` 任一变化即报告。
-2. **通道集合**：新增（默认落 catch-all，需补实现）与删除（移植层再返回旧值即成死分支）。
-3. **移植层断链**：`patches/*.js` 里还在引用、但新版已删除的通道名 → 🔴 必须处理。
-4. **契约文件哈希**：`src/preload/**`、`src/browser_native/preload/**`、`constants.js` 的逐个文件对比，定位入参/回参形状变化。
-5. **webapp 指纹**：前端资源整体换代提示。
+| 维度 | 说明 |
+|---|---|
+| 版本 | `version` / `buildVersion` / `config.commitId` 任一变化即报告 |
+| 通道集合 | 新增（默认落 catch-all，需补实现）与删除（移植层再返回旧值即成死分支） |
+| 移植层断链 | 🔴 `patches/*.js` 里仍在引用、但新版已删除的通道名 |
+| 契约文件 | `src/preload/**`、`src/browser_native/preload/**`、`constants.js` 逐文件哈希 |
+| **webapp 路径** | 文件集合指纹（`pathDigest`）：新增/删除/改名 |
+| **webapp 内容** | 逐文件 `path\0size\0sha` 汇总指纹（`contentDigest`）：**文件名没变但内容被替换** |
 
-已验证：对当前 0.112.0 运行输出「✅ 与基线一致」、退出码 0；构造一份「新增一条通道 + 删除 `SYSTEM_GET_UNIQUE`」的伪上游后，脚本正确报出新增/删除，并把 `SYSTEM_GET_UNIQUE` 标为「移植层仍在引用的已删除通道」，退出码 1。
+**关键契约文件**按逻辑名单独登记，避免官方改文件名后对不上：
 
-后续可接的两步（尚未做）：
+| 逻辑名 | 定位方式 | 关注的契约 |
+|---|---|---|
+| `webapp-entry` | 固定路径 | 前端入口 |
+| `preload-runtime-domain` | 固定路径 | 域名切换返回形状（`activeApiOrigin` 等） |
+| `preload-system` | 固定路径 | `GET_UNIQUE` / `GET_UNIQUE_DETAIL` 调用方式 |
+| `device-feature-builder` | 内容特征 `x-client-username` | 设备指纹请求头拼装 |
+| `device-detail-consumer` | 内容特征 `is_in_vm_by_cpu_id` | `bios` / `machine` / `device_id` 消费点 |
+
+### 10.1 修复的漏检（旧实现的问题）
+
+旧版 `webappHash = sha(文件路径列表.join('
+'))` **只对路径做哈希**：官方替换了某个 chunk 的内容但文件名不变时（内容哈希通常也在文件名里，但内联小文件、`index.htm`、`assets/` 下的资源不会变名），完全检测不到。这正是「webapp 内容变化可能漏检」的根因。
+
+现在 webapp 分成两个指纹，报告也分开：
+
+- 路径变了 → 「webapp 文件增删 / 改名」
+- 只有内容变 → 「🔴 webapp 内容变化（文件名没变）」，并提示对照本表复核通道形状
+
+### 10.2 已验证的三种漂移
+
+| 构造的场景 | 输出 | 退出码 |
+|---|---|---|
+| 同名 chunk 追加一行（内容变） | 🔴 webapp 内容变化 + 关键文件 `device-feature-builder` 内容变化 | 1 |
+| 改 `src/preload/runtime-domain.js` | 关键契约文件漂移 → `preload-runtime-domain` 内容变化 | 1 |
+| 把 chunk 改名 | webapp 路径漂移 + 关键文件「路径新增/路径消失」 | 1 |
+| 未改动的原始客户端 | ✅ 与基线一致（209 通道 / 485 文件 / 30.0 MB） | 0 |
+
+### 10.3 后续可接的两步（尚未做）
+
 - GitHub Actions 在 `workflow_dispatch` 里跑本脚本，产出漂移报告 artifact；
-- 启动自检：`patches/main.js` 启动时比对 `constants.js` 通道数与基线，不一致就在日志里告警（不阻塞启动）。
+- 启动自检：`patches/main.js` 启动时比对 `constants.js` 通道数与基线，不一致就告警（不阻塞启动）。
 
 ## 附录 · 209 条全量索引
 

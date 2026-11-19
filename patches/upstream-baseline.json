@@ -1,4 +1,5 @@
 {
+  "schema": 2,
   "version": "0.112.0",
   "buildVersion": "0.112.0",
   "commitId": "c5af7134a73fc3a9b4c9592347148e3776884b08",
@@ -427,7 +428,7 @@
   },
   "constantsHash": "452c3b1a6ab9a71c",
   "hashes": {
-    "src/preload/auto-launch.js": "a9e0e82a8833869a",
+    "src/preload/auto-launch.js": "add7ebb7b66861a5",
     "src/preload/commonpreload.js": "f811426feedfe20c",
     "src/preload/httpsvr.js": "d3e30cf50fadfd04",
     "src/preload/local-socket.js": "1b8e11d533ac4b5c",
@@ -471,7 +472,65 @@
     "src/browser_native/preload/window.js": "d10d0b69b717249f",
     "src/browser_native/constants.js": "452c3b1a6ab9a71c"
   },
-  "webappFileCount": 485,
-  "webappHash": "1b42465c92ae9fef",
-  "generatedAt": "2026-11-19T14:02:56.141Z"
+  "webapp": {
+    "fileCount": 485,
+    "totalBytes": 31457501,
+    "pathDigest": "1b42465c92ae9fef",
+    "contentDigest": "e0103ab7d04177bd"
+  },
+  "keyFiles": {
+    "webapp-entry": {
+      "paths": [
+        "webapp/build/index.htm"
+      ],
+      "hashes": {
+        "webapp/build/index.htm": "1be34d36ccba69ef"
+      }
+    },
+    "preload-runtime-domain": {
+      "paths": [
+        "src/preload/runtime-domain.js"
+      ],
+      "hashes": {
+        "src/preload/runtime-domain.js": "780e4f60b7c72ea7"
+      }
+    },
+    "preload-system": {
+      "paths": [
+        "src/browser_native/preload/system.js"
+      ],
+      "hashes": {
+        "src/browser_native/preload/system.js": "6c74f1869be77448"
+      }
+    },
+    "device-feature-builder": {
+      "paths": [
+        "webapp/build/static/js/2557.a204bfa0.js",
+        "webapp/build/static/js/6933.6b14a92f.js",
+        "webapp/build/static/js/index.6fab6a75.js",
+        "webapp/build/static/js/toolbar.81777997.js"
+      ],
+      "hashes": {
+        "webapp/build/static/js/2557.a204bfa0.js": "2060be89d69400f9",
+        "webapp/build/static/js/6933.6b14a92f.js": "1f662ef91245745f",
+        "webapp/build/static/js/index.6fab6a75.js": "31eecb1e2f7ec557",
+        "webapp/build/static/js/toolbar.81777997.js": "e1924189f07979f8"
+      }
+    },
+    "device-detail-consumer": {
+      "paths": [
+        "webapp/build/static/js/2557.a204bfa0.js",
+        "webapp/build/static/js/6933.6b14a92f.js",
+        "webapp/build/static/js/index.6fab6a75.js",
+        "webapp/build/static/js/toolbar.81777997.js"
+      ],
+      "hashes": {
+        "webapp/build/static/js/2557.a204bfa0.js": "2060be89d69400f9",
+        "webapp/build/static/js/6933.6b14a92f.js": "1f662ef91245745f",
+        "webapp/build/static/js/index.6fab6a75.js": "31eecb1e2f7ec557",
+        "webapp/build/static/js/toolbar.81777997.js": "e1924189f07979f8"
+      }
+    }
+  },
+  "generatedAt": "2026-11-19T14:58:24.220Z"
 }
