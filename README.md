@@ -306,6 +306,8 @@ bash scripts/build-rpm.sh       # 单独出 rpm（绕开 fpm）
 
 详细步骤、依赖和踩坑记录见 [docs/BUILD.md](docs/BUILD.md)。
 
+209 个 IPC 通道的实现状态分类见 [docs/IPC-CONTRACT.md](docs/IPC-CONTRACT.md)；Electron 安全配置的实测结论见 [docs/SECURITY.md](docs/SECURITY.md)。
+
 ---
 
 ## 项目结构
@@ -319,6 +321,7 @@ patches/              移植层：覆盖到 app 目录上的文件
 ├── handlers.js         209 个 IPC 通道的真实实现
 ├── preload-shim.js     预加载钩子：原生模块打桩、字体、按键桥
 ├── device-identity.js  设备指纹（服务端登录风控需要）
+├── upstream-baseline.json  上游契约基线（209 通道 + 文件哈希）
 ├── resourse/kook.png   官方 logo
 └── src/
     ├── browser_native/screen-recording-main.js   xdg-desktop-portal 采集
@@ -328,9 +331,9 @@ patches/              移植层：覆盖到 app 目录上的文件
     ├── media/win-geom.py                         窗口位置计算
     ├── preload/auto-launch.js                    改过的官方文件（XDG 自启）
     └── renderer/linux-overlay/                   屏幕覆盖层页面
-scripts/              组装与打包脚本
+scripts/              组装与打包脚本；check-upstream.mjs 做上游版本兼容性检测
 build/                打包资源（图标、desktop 模板、afterPack 钩子）
-docs/                 构建与实现说明
+docs/                 构建说明、IPC 契约表、安全配置说明
 .github/              Issue 模板、Release 说明模板
 ```
 
