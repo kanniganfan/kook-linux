@@ -441,6 +441,33 @@ function createRuntime({ app, LOG }) {
 
   // 稳定机器标识（首次生成后复用）
   const idFile = path.join(dir, 'machine-id')
+  // ── 设备指纹来源（灰度）──
+  // 官方 device-feature 要 { bios, machine, device_id }；当前线上只发 device_id（{id,type} 形状），
+  // bios/machine 被 JSON.stringify 吞掉。补齐会换掉全员指纹 → 用环境变量灰度，默认关。
+  const DETAIL_FULL = process.env.KOOK_DEVICE_DETAIL_FULL === '1'
+  let fingerprint = null
+  function deviceFingerprint() {
+    if (fingerprint) return fingerprint
+    if (!DETAIL_FULL) {
+      fingerprint = { mode: 'legacy', device_id: null, bios: null, machine: null }
+      return fingerprint
+    }
+    const identity = require(path.join(__dirname, 'device-identity.js')).createDeviceIdentity(app)
+    fingerprint = {
+      mode: 'full',
+      device_id: identity.device_id,
+      bios: identity.bios,
+      machine: identity.machine,
+    }
+    LOG(
+      '[device] 灰度开启：指纹切换为完整形状',
+      'device_id=' + identity.device_id,
+      'bios=' + identity.bios,
+      'machine=' + identity.machine
+    )
+    return fingerprint
+  }
+
   let machineId = ''
   try {
     machineId = fs.readFileSync(idFile, 'utf8').trim()
@@ -651,8 +678,17 @@ function createRuntime({ app, LOG }) {
     },
     SYSTEM_GET_PCNAME: () => 'DESKTOP-K00KPC',
     SYSTEM_GET_SYSTEM_VERSION: () => '10.0.22631',
-    SYSTEM_GET_UNIQUE: () => machineId,
-    SYSTEM_GET_UNIQUE_DETAIL: () => ({ id: machineId, type: 'linux' }),
+    SYSTEM_GET_UNIQUE: () => {
+      const fp = deviceFingerprint()
+      // 关灰度时保持线上值（machineId）不变，避免老用户指纹漂移
+      return fp.mode === 'full' ? fp.device_id : machineId
+    },
+    SYSTEM_GET_UNIQUE_DETAIL: () => {
+      const fp = deviceFingerprint()
+      if (fp.mode !== 'full') return { id: machineId, type: 'linux' }
+      // webapp 直接用这三个字段拼 device-feature；device_id 必须与 getUnique 一致
+      return { bios: fp.bios, machine: fp.machine, device_id: fp.device_id }
+    },
     SYSTEM_GET_ARGV: () => process.argv.slice(1),
     SYSTEM_GET_ACTIVE_DOMAIN: () => domainSnapshot(),
     SYSTEM_GET_HARDWARE_ACCELERATION: () => true,
