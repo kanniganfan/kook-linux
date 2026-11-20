@@ -2389,6 +2389,7 @@ let mainWin = null
 // ────────── 3.7 桌面集成：托盘、关闭到托盘、硬件加速、效能模式 ──────────
 let tray = null
 let quitForReal = false
+let hideNotified = false
 
 // 退出意图必须能穿透「关闭到托盘」的拦截。
 // 之前只有在托盘菜单里点「退出」才会把 quitForReal 置真，于是 SIGTERM、会话注销、
@@ -2540,10 +2541,24 @@ function installDesktopIntegration() {
   try {
     mainWin.on('close', (e) => {
       if (quitForReal) return
-      if (tray && globalPref('win_close_to_tray', true) === true) {
+      // 默认不拦截：窗口无系统边框，用户点自己画的关闭按钮就是「关掉」，
+      // 藏到托盘里会让人以为关不掉（GNOME 默认还没有托盘宿主）。
+      // 想要托盘常驻的用户在设置里显式打开。
+      if (tray && globalPref('win_close_to_tray', false) === true) {
         e.preventDefault()
         mainWin.hide()
         LOG('[desktop] 已最小化到托盘')
+        // 藏起来之后必须让人知道去哪找，否则就是「关不掉」
+        try {
+          if (!hideNotified && require('electron').Notification.isSupported()) {
+            hideNotified = true
+            new (require('electron').Notification)({
+              title: 'KOOK 仍在后台运行',
+              body: '窗口已最小化到托盘。要彻底退出，右键托盘图标选「退出」，或在设置里关闭「关闭时最小化到托盘」。',
+              silent: true,
+            }).show()
+          }
+        } catch {}
       }
     })
   } catch {}
